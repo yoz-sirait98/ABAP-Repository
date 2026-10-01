@@ -1,0 +1,10 @@
+*&---------------------------------------------------------------------*
+*&  Include  ZOO_HANDLER_EXAMPLE_SCR
+*&---------------------------------------------------------------------*
+*&  Title           : Selection Screen
+*&  Author          : Yosua Sirait
+*&  Date            : 20261001
+*&  Description     : Parameter selection untuk ZOO_HANDLER_EXAMPLE.
+*&---------------------------------------------------------------------*
+
+PARAMETERS: p_matnr TYPE mara-matnr OBLIGATORY.

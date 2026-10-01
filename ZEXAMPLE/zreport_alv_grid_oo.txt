@@ -1,0 +1,334 @@
+*&---------------------------------------------------------------------*
+*& Report  ZREPORT_ALV_GRID OO
+*&
+*&---------------------------------------------------------------------*
+*& Same material master ALV Grid report as ZREPORT_ALV_GRID, but the
+*& logic lives in a LOCAL CLASS (ABAP Objects), classic ECC-compatible
+*& syntax only:
+*&   - no inline DATA( ), no @ annotations, no CDS, no TABLES OF
+*&   - ALL types are defined at the TOP (global declaration part),
+*&     the selection screen comes before the class definition
+*&   - SELECT-OPTIONS/PARAMETERS are only allowed in the global part,
+*&     NOT inside a class. The class methods use the global
+*&     select-options directly (global objects are visible inside
+*&     methods); this also avoids the strict select-option/RANGE
+*&     type-equivalence check on method parameters
+*&   - LEFT OUTER JOIN WHERE restriction handled exactly as in the
+*&     procedural version (plant filtered on the internal table)
+*& ALV display still via REUSE_ALV_GRID_DISPLAY (SLIS function module),
+*& so TYPE-POOLS: slis is mandatory.
+*&---------------------------------------------------------------------*
+REPORT zreport_alv_grid_oo
+       NO STANDARD PAGE HEADING
+       LINE-SIZE 255.
+
+*----------------------------------------------------------------------*
+* Type pools (needed for slis_t_fieldcat_alv, slis_layout_alv etc.)
+*----------------------------------------------------------------------*
+TYPE-POOLS: slis.
+
+*----------------------------------------------------------------------*
+* Tables (for SELECT-OPTIONS 'FOR' references)
+*----------------------------------------------------------------------*
+TABLES: mara,
+        marc,
+        makt.
+
+*----------------------------------------------------------------------*
+* Global type (shared between selection screen and the class)
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_data,
+         matnr TYPE mara-matnr,   " Material number
+         mtart TYPE mara-mtart,   " Material type
+         mbrsh TYPE mara-mbrsh,   " Industry sector
+         lvorm TYPE mara-lvorm,   " Flag: material deleted
+         meins TYPE mara-meins,   " Base unit of measure
+         werks TYPE marc-werks,   " Plant
+         pstat TYPE marc-pstat,   " Maintenance status
+         ekgrp TYPE marc-ekgrp,   " Purchasing group
+         maktx TYPE makt-maktx,   " Material description
+       END OF ty_data.
+
+*----------------------------------------------------------------------*
+* Selection screen (global declaration part, before the class;
+* SELECT-OPTIONS/PARAMETERS are not allowed inside a class)
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-001.
+SELECT-OPTIONS: s_matnr FOR mara-matnr,
+                s_mtart FOR mara-mtart,
+                s_werks FOR marc-werks.
+PARAMETERS: p_all AS CHECKBOX DEFAULT 'X'.  " Show materials w/o plant
+SELECTION-SCREEN END OF BLOCK b1.
+
+*----------------------------------------------------------------------*
+* Local class definition
+*----------------------------------------------------------------------*
+CLASS lcl_report DEFINITION CREATE PUBLIC.
+
+  PUBLIC SECTION.
+
+    METHODS:
+      constructor
+        IMPORTING im_all TYPE char1,
+      get_data,
+      display_alv.
+
+  PRIVATE SECTION.
+
+    DATA: gt_data    TYPE STANDARD TABLE OF ty_data
+                         WITH DEFAULT KEY,
+          gv_all     TYPE char1,
+          gv_repid   TYPE sy-repid,
+          gs_layout  TYPE slis_layout_alv,
+          gs_variant TYPE disvariant,
+          gt_fcat    TYPE slis_t_fieldcat_alv,
+          gt_sort    TYPE slis_t_sortinfo_alv.
+
+    METHODS:
+      build_fieldcatalog,
+      build_layout,
+      build_sort,
+      filter_werks.
+
+ENDCLASS.                    " lcl_report DEFINITION
+
+*----------------------------------------------------------------------*
+* Local class implementation
+*----------------------------------------------------------------------*
+CLASS lcl_report IMPLEMENTATION.
+
+  METHOD constructor.
+    gv_repid          = sy-repid.
+    gv_all            = im_all.
+    gs_variant-report = gv_repid.
+  ENDMETHOD.                " constructor
+
+*----------------------------------------------------------------------*
+  METHOD get_data.
+
+*   NOTE: In a LEFT OUTER JOIN the WHERE clause may not contain fields
+*         of the right-hand table (MARC~WERKS). Therefore the plant
+*         selection is applied to the internal table afterwards.
+
+*   NOTE: the methods use the GLOBAL select-options (s_matnr, s_mtart,
+*   s_werks) directly - global objects are visible inside class methods,
+*   and this avoids the strict select-option/RANGE type-equivalence
+*   check on method parameters entirely.
+
+    IF gv_all = 'X'.
+*     Materials with and without plant data
+      SELECT mara~matnr mara~mtart mara~mbrsh mara~lvorm
+             mara~meins marc~werks marc~pstat marc~ekgrp
+             makt~maktx
+        INTO CORRESPONDING FIELDS OF TABLE gt_data
+        FROM mara
+        LEFT OUTER JOIN marc
+          ON mara~matnr = marc~matnr
+        LEFT OUTER JOIN makt
+          ON mara~matnr = makt~matnr
+         AND makt~spras = sy-langu
+        WHERE mara~matnr IN s_matnr
+          AND mara~mtart IN s_mtart
+          AND mara~lvorm = space.
+
+      filter_werks( ).
+    ELSE.
+*     Only materials with plant data -> INNER JOIN, plant in WHERE OK
+      SELECT mara~matnr mara~mtart mara~mbrsh mara~lvorm
+             mara~meins marc~werks marc~pstat marc~ekgrp
+             makt~maktx
+        INTO CORRESPONDING FIELDS OF TABLE gt_data
+        FROM mara
+        INNER JOIN marc
+          ON mara~matnr = marc~matnr
+        LEFT OUTER JOIN makt
+          ON mara~matnr = makt~matnr
+         AND makt~spras = sy-langu
+        WHERE mara~matnr IN s_matnr
+          AND mara~mtart IN s_mtart
+          AND marc~werks IN s_werks
+          AND mara~lvorm = space.
+    ENDIF.
+
+    SORT gt_data BY matnr werks.
+
+  ENDMETHOD.                " get_data
+
+*----------------------------------------------------------------------*
+  METHOD filter_werks.
+
+*   Filter plant on internal table (LEFT JOIN keeps empty WERKS rows).
+*   'IN' on the select-option table handles sign/option/intervals.
+    DATA: ls_data TYPE ty_data.
+
+    IF s_werks[] IS INITIAL.
+      RETURN.
+    ENDIF.
+
+*   Is the dummy plant 1001 part of the selection? (checked once,
+*   simple loop - no READ TABLE key issues)
+    DATA: lv_keep_empty TYPE char1.
+    CLEAR lv_keep_empty.
+    LOOP AT s_werks TRANSPORTING NO FIELDS
+         WHERE sign = 'I' AND option = 'EQ' AND low = '1001'.
+      lv_keep_empty = 'X'.
+      EXIT.
+    ENDLOOP.
+
+    LOOP AT gt_data INTO ls_data.
+      IF ls_data-werks IS INITIAL.
+*       Keep plant-less materials only if 1001 (dummy) is in range
+        IF lv_keep_empty IS INITIAL.
+          DELETE gt_data INDEX sy-tabix.
+        ENDIF.
+      ELSE.
+        IF NOT ls_data-werks IN s_werks.
+          DELETE gt_data INDEX sy-tabix.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.                " filter_werks
+
+*----------------------------------------------------------------------*
+  METHOD build_fieldcatalog.
+
+    DATA: ls_fcat TYPE slis_fieldcat_alv.
+
+    REFRESH gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'MATNR'.
+    ls_fcat-ref_tabname = 'MARA'.
+    ls_fcat-col_pos     = 1.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'MAKTX'.
+    ls_fcat-ref_tabname = 'MAKT'.
+    ls_fcat-col_pos     = 2.
+    ls_fcat-seltext_l   = 'Material Description'.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'MTART'.
+    ls_fcat-ref_tabname = 'MARA'.
+    ls_fcat-col_pos     = 3.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'MBRSH'.
+    ls_fcat-ref_tabname = 'MARA'.
+    ls_fcat-col_pos     = 4.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'MEINS'.
+    ls_fcat-ref_tabname = 'MARA'.
+    ls_fcat-col_pos     = 5.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'WERKS'.
+    ls_fcat-ref_tabname = 'MARC'.
+    ls_fcat-col_pos     = 6.
+    ls_fcat-seltext_l   = 'Plant'.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'PSTAT'.
+    ls_fcat-ref_tabname = 'MARC'.
+    ls_fcat-col_pos     = 7.
+    APPEND ls_fcat TO gt_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname   = 'EKGRP'.
+    ls_fcat-ref_tabname = 'MARC'.
+    ls_fcat-col_pos     = 8.
+    ls_fcat-seltext_l   = 'Purch. Group'.
+    APPEND ls_fcat TO gt_fcat.
+
+  ENDMETHOD.                " build_fieldcatalog
+
+*----------------------------------------------------------------------*
+  METHOD build_layout.
+    CLEAR gs_layout.
+    gs_layout-zebra             = 'X'.
+    gs_layout-colwidth_optimize = 'X'.
+  ENDMETHOD.                " build_layout
+
+*----------------------------------------------------------------------*
+  METHOD build_sort.
+
+    DATA: ls_sort TYPE slis_sortinfo_alv.
+
+    REFRESH gt_sort.
+
+    CLEAR ls_sort.
+    ls_sort-spos      = 1.
+    ls_sort-fieldname = 'MATNR'.
+    ls_sort-up        = 'X'.
+    APPEND ls_sort TO gt_sort.
+
+    CLEAR ls_sort.
+    ls_sort-spos      = 2.
+    ls_sort-fieldname = 'WERKS'.
+    ls_sort-up        = 'X'.
+    APPEND ls_sort TO gt_sort.
+
+  ENDMETHOD.                " build_sort
+
+*----------------------------------------------------------------------*
+  METHOD display_alv.
+
+    IF gt_data[] IS INITIAL.
+      WRITE: / 'No data found for the given selection'.
+      RETURN.
+    ENDIF.
+
+    build_fieldcatalog( ).
+    build_layout( ).
+    build_sort( ).
+
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_callback_program = gv_repid
+        is_layout          = gs_layout
+        it_fieldcat        = gt_fcat
+        it_sort            = gt_sort
+        i_save             = 'A'
+        is_variant         = gs_variant
+        i_grid_title       = 'Material Master ALV Report (OO)'
+      TABLES
+        t_outtab           = gt_data
+      EXCEPTIONS
+        program_error      = 1
+        OTHERS             = 2.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.                " display_alv
+
+ENDCLASS.                    " lcl_report IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+* MAIN
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+
+  DATA: lo_report TYPE REF TO lcl_report.
+
+* Only the checkbox is passed; the select-options are global objects
+* and are used directly inside the class methods.
+  CREATE OBJECT lo_report
+    EXPORTING
+      im_all = p_all.
+
+  lo_report->get_data( ).
+
+END-OF-SELECTION.
+
+  lo_report->display_alv( ).

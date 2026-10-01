@@ -1,0 +1,137 @@
+*&---------------------------------------------------------------------*
+*&  Include  ZOO_HANDLER_EXAMPLE_CLS
+*&---------------------------------------------------------------------*
+*&  Title           : Local Class LCL_HANDLER
+*&  Author          : Yosua Sirait
+*&  Date            : 20261001
+*&  Description     : Class DEFINITION, global DATA (REF TO
+*&                    lcl_handler), lalu IMPLEMENTATION.
+*&---------------------------------------------------------------------*
+*& Global DATA (object reference) setelah ENDCLASS, karena syntax
+*& check SE38 membaca program secara berurutan.
+*&---------------------------------------------------------------------*
+
+*---------------------------------------------------------------------*
+* Class Definition
+*---------------------------------------------------------------------*
+CLASS lcl_handler DEFINITION.
+
+  PUBLIC SECTION.
+
+    METHODS:
+      process_data
+        IMPORTING
+          iv_matnr TYPE mara-matnr
+        EXCEPTIONS
+          material_not_found.
+
+  PRIVATE SECTION.
+
+    METHODS:
+      read_material
+        IMPORTING
+          iv_matnr       TYPE mara-matnr
+        EXPORTING
+          es_material    TYPE ty_material
+        EXCEPTIONS
+          material_not_found,
+
+      display_material
+        IMPORTING
+          is_material    TYPE ty_material.
+
+    DATA:
+      mv_matnr TYPE mara-matnr.
+
+ENDCLASS.                    "lcl_handler DEFINITION
+
+*---------------------------------------------------------------------*
+* Global DATA
+* (setelah ENDCLASS definition: TYPE REF TO lcl_handler baru dikenal
+*  pada titik ini oleh syntax check SE38)
+*---------------------------------------------------------------------*
+DATA: go_handler TYPE REF TO lcl_handler.
+
+*---------------------------------------------------------------------*
+* Class Implementation
+*---------------------------------------------------------------------*
+CLASS lcl_handler IMPLEMENTATION.
+
+*-------------------------------------------------------------------*
+* Method process_data
+*-------------------------------------------------------------------*
+  METHOD process_data.
+
+    DATA: ls_material TYPE ty_material.
+
+    mv_matnr = iv_matnr.
+
+    CALL METHOD read_material
+      EXPORTING
+        iv_matnr           = iv_matnr
+      IMPORTING
+        es_material        = ls_material
+      EXCEPTIONS
+        material_not_found = 1
+        OTHERS             = 2.
+
+    IF sy-subrc <> 0.
+      WRITE: / 'Material', iv_matnr, 'tidak ditemukan di MARA.'.
+      RETURN.
+    ENDIF.
+
+    CALL METHOD display_material
+      EXPORTING
+        is_material = ls_material.
+
+  ENDMETHOD.                "process_data
+
+*-------------------------------------------------------------------*
+* Method read_material
+*-------------------------------------------------------------------*
+  METHOD read_material.
+
+    DATA: lt_material TYPE ty_t_material.
+
+    CLEAR es_material.
+    REFRESH lt_material.
+
+    SELECT mara~matnr
+           mara~mtart
+           mara~lvorm
+           mara~meins
+           makt~maktg
+      INTO TABLE lt_material
+      FROM mara
+      LEFT OUTER JOIN makt
+        ON mara~matnr = makt~matnr
+       AND makt~spras = sy-langu
+      WHERE mara~matnr = iv_matnr.
+
+    IF sy-subrc <> 0 OR lt_material IS INITIAL.
+      RAISE material_not_found.
+    ENDIF.
+
+    READ TABLE lt_material INTO es_material INDEX 1.
+
+  ENDMETHOD.                "read_material
+
+*-------------------------------------------------------------------*
+* Method display_material
+*-------------------------------------------------------------------*
+  METHOD display_material.
+
+    WRITE: / 'Material      :', is_material-matnr.
+    WRITE: / 'Material type :', is_material-mtart.
+    WRITE: / 'Base UoM      :', is_material-meins.
+    WRITE: / 'Description   :', is_material-maktg.
+
+    IF is_material-lvorm = 'X'.
+      WRITE: / 'Status        : FLAGGED FOR DELETION'.
+    ELSE.
+      WRITE: / 'Status        : OK'.
+    ENDIF.
+
+  ENDMETHOD.                "display_material
+
+ENDCLASS.                    "lcl_handler IMPLEMENTATION

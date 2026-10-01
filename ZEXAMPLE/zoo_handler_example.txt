@@ -1,0 +1,35 @@
+*&---------------------------------------------------------------------*
+*&  Report  ZOO_HANDLER_EXAMPLE
+*&---------------------------------------------------------------------*
+*&  Title           : Contoh Sederhana ABAP OO Local Class
+*&  Transaction     : [T-CODE]
+*&  Author          : Yosua Sirait
+*&  Requester       : [USER_DEFINE]
+*&  Date            : 20261001
+*&  Description     : Demo local class LCL_HANDLER dengan method
+*&                    PROCESS_DATA (import material), baca MARA/MAKT
+*&                    dan tampilkan ringkasan WRITE.
+*&
+*& Struktur includes (urutan INCLUDE = urutan syntax check SE38):
+*&   ZOO_HANDLER_EXAMPLE_TOP ... TYPES global
+*&   ZOO_HANDLER_EXAMPLE_CLS ... Class DEFINITION + global DATA
+*&                               (REF TO lcl_handler) + IMPLEMENTATION
+*&   ZOO_HANDLER_EXAMPLE_SCR ... Selection screen
+*&---------------------------------------------------------------------*
+REPORT zoo_handler_example NO STANDARD PAGE HEADING.
+
+INCLUDE zoo_handler_example_top.
+INCLUDE zoo_handler_example_cls.
+INCLUDE zoo_handler_example_scr.
+
+*---------------------------------------------------------------------*
+* Event block: object dibuat di START-OF-SELECTION
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+  CREATE OBJECT go_handler.
+
+  CALL METHOD go_handler->process_data
+    EXPORTING
+      iv_matnr = p_matnr.
+

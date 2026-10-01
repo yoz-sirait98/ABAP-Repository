@@ -1,0 +1,253 @@
+*&---------------------------------------------------------------------*
+*& Report  ZREPORT_ALV_GRID
+*&
+*&---------------------------------------------------------------------*
+*& Display a material master report in an ALV Grid (classic syntax,
+*& SAP ECC R/3 4.6C+ compatible).
+*& Uses REUSE_ALV_GRID_DISPLAY - no OO, no internal table
+*& definitions with TABLES OF, no inline declarations.
+*&---------------------------------------------------------------------*
+REPORT zreport_alv_grid
+       NO STANDARD PAGE HEADING
+       LINE-SIZE 255.
+
+*----------------------------------------------------------------------*
+* Type pools (needed for slis_t_fieldcat_alv, slis_layout_alv etc.)
+*----------------------------------------------------------------------*
+TYPE-POOLS: slis.
+
+*----------------------------------------------------------------------*
+* Tables
+*----------------------------------------------------------------------*
+TABLES: mara,
+        marc,
+        makt.
+
+*----------------------------------------------------------------------*
+* Types
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_data,
+         matnr TYPE mara-matnr,   " Material number
+         mtart TYPE mara-mtart,   " Material type
+         mbrsh TYPE mara-mbrsh,   " Industry sector
+         lvorm TYPE mara-lvorm,   " Flag: material deleted
+         meins TYPE mara-meins,   " Base unit of measure
+         werks TYPE marc-werks,   " Plant
+         pstat TYPE marc-pstat,   " Maintenance status
+         ekgrp TYPE marc-ekgrp,   " Purchasing group
+         maktx TYPE makt-maktx,   " Material description
+       END OF ty_data.
+
+*----------------------------------------------------------------------*
+* Internal tables and work areas
+*----------------------------------------------------------------------*
+DATA: it_data  TYPE ty_data OCCURS 0 WITH HEADER LINE,
+      it_fcat  TYPE slis_t_fieldcat_alv WITH HEADER LINE,
+      it_sort  TYPE slis_t_sortinfo_alv WITH HEADER LINE,
+      gs_layout TYPE slis_layout_alv,
+      gs_variant TYPE disvariant.
+
+DATA: gv_repid LIKE sy-repid.
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-001.
+SELECT-OPTIONS: s_matnr FOR mara-matnr,
+                s_mtart FOR mara-mtart,
+                s_werks FOR marc-werks.
+PARAMETERS: p_all AS CHECKBOX DEFAULT 'X'.  " Show materials w/o plant
+SELECTION-SCREEN END OF BLOCK b1.
+
+*----------------------------------------------------------------------*
+* INITIALIZATION
+*----------------------------------------------------------------------*
+INITIALIZATION.
+  gv_repid = sy-repid.
+  gs_variant-report = gv_repid.
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+  PERFORM get_data.
+
+*----------------------------------------------------------------------*
+* END-OF-SELECTION
+*----------------------------------------------------------------------*
+END-OF-SELECTION.
+  IF it_data[] IS INITIAL.
+    WRITE: / 'No data found for the given selection'.
+  ELSE.
+    PERFORM build_fieldcatalog.
+    PERFORM build_layout.
+    PERFORM build_sort.
+    PERFORM display_alv.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DATA
+*&---------------------------------------------------------------------*
+FORM get_data.
+
+* NOTE: In a LEFT OUTER JOIN the WHERE clause may not contain fields
+*       of the right-hand table (MARC~WERKS). Therefore the plant
+*       selection is applied to the internal table afterwards.
+
+  IF p_all = 'X'.
+*   Materials with and without plant data
+    SELECT mara~matnr mara~mtart mara~mbrsh mara~lvorm
+           mara~meins marc~werks marc~pstat marc~ekgrp
+           makt~maktx
+      INTO CORRESPONDING FIELDS OF TABLE it_data
+      FROM mara
+      LEFT OUTER JOIN marc
+        ON mara~matnr = marc~matnr
+      LEFT OUTER JOIN makt
+        ON mara~matnr = makt~matnr
+       AND makt~spras = sy-langu
+      WHERE mara~matnr IN s_matnr
+        AND mara~mtart IN s_mtart
+        AND mara~lvorm = space.
+
+*   Filter plant on internal table (LEFT JOIN keeps empty WERKS rows)
+    IF NOT s_werks[] IS INITIAL.
+      LOOP AT it_data.
+        IF it_data-werks IS INITIAL.
+*         Keep plant-less materials only if 1001 (dummy) is in range
+          READ TABLE s_werks WITH KEY low = '1001' sign = 'I'.
+          IF sy-subrc <> 0.
+            DELETE it_data.
+          ENDIF.
+        ELSE.
+          IF NOT it_data-werks IN s_werks.
+            DELETE it_data.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ELSE.
+*   Only materials with plant data -> INNER JOIN, plant in WHERE is OK
+    SELECT mara~matnr mara~mtart mara~mbrsh mara~lvorm
+           mara~meins marc~werks marc~pstat marc~ekgrp
+           makt~maktx
+      INTO CORRESPONDING FIELDS OF TABLE it_data
+      FROM mara
+      INNER JOIN marc
+        ON mara~matnr = marc~matnr
+      LEFT OUTER JOIN makt
+        ON mara~matnr = makt~matnr
+       AND makt~spras = sy-langu
+      WHERE mara~matnr IN s_matnr
+        AND mara~mtart IN s_mtart
+        AND marc~werks IN s_werks
+        AND mara~lvorm = space.
+  ENDIF.
+
+  SORT it_data BY matnr werks.
+
+ENDFORM.                    " GET_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  BUILD_FIELDCATALOG
+*&---------------------------------------------------------------------*
+FORM build_fieldcatalog.
+
+  CLEAR it_fcat.
+  REFRESH it_fcat.
+
+  it_fcat-fieldname = 'MATNR'.
+  it_fcat-ref_tabname = 'MARA'.
+  it_fcat-col_pos = 1.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'MAKTX'.
+  it_fcat-ref_tabname = 'MAKT'.
+  it_fcat-col_pos = 2.
+  it_fcat-seltext_l = 'Material Description'.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'MTART'.
+  it_fcat-ref_tabname = 'MARA'.
+  it_fcat-col_pos = 3.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'MBRSH'.
+  it_fcat-ref_tabname = 'MARA'.
+  it_fcat-col_pos = 4.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'MEINS'.
+  it_fcat-ref_tabname = 'MARA'.
+  it_fcat-col_pos = 5.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'WERKS'.
+  it_fcat-ref_tabname = 'MARC'.
+  it_fcat-col_pos = 6.
+  it_fcat-seltext_l = 'Plant'.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'PSTAT'.
+  it_fcat-ref_tabname = 'MARC'.
+  it_fcat-col_pos = 7.
+  APPEND it_fcat.
+
+  it_fcat-fieldname = 'EKGRP'.
+  it_fcat-ref_tabname = 'MARC'.
+  it_fcat-col_pos = 8.
+  it_fcat-seltext_l = 'Purch. Group'.
+  APPEND it_fcat.
+
+ENDFORM.                    " BUILD_FIELDCATALOG
+
+*&---------------------------------------------------------------------*
+*&      Form  BUILD_LAYOUT
+*&---------------------------------------------------------------------*
+FORM build_layout.
+  CLEAR gs_layout.
+  gs_layout-zebra             = 'X'.
+  gs_layout-colwidth_optimize = 'X'.
+ENDFORM.                    " BUILD_LAYOUT
+
+*&---------------------------------------------------------------------*
+*&      Form  BUILD_SORT
+*&---------------------------------------------------------------------*
+FORM build_sort.
+  CLEAR it_sort.
+  REFRESH it_sort.
+
+  it_sort-spos      = 1.
+  it_sort-fieldname = 'MATNR'.
+  it_sort-up        = 'X'.
+  APPEND it_sort.
+
+  it_sort-spos      = 2.
+  it_sort-fieldname = 'WERKS'.
+  it_sort-up        = 'X'.
+  APPEND it_sort.
+ENDFORM.                    " BUILD_SORT
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV
+*&---------------------------------------------------------------------*
+FORM display_alv.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program = gv_repid
+      is_layout          = gs_layout
+      it_fieldcat        = it_fcat[]
+      it_sort            = it_sort[]
+      i_save             = 'A'
+      is_variant         = gs_variant
+      i_grid_title       = 'Material Master ALV Report'
+    TABLES
+      t_outtab           = it_data
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV

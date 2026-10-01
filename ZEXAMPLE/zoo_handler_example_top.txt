@@ -1,0 +1,22 @@
+*&---------------------------------------------------------------------*
+*&  Include  ZOO_HANDLER_EXAMPLE_TOP
+*&---------------------------------------------------------------------*
+*&  Title           : Global TYPES
+*&  Author          : Yosua Sirait
+*&  Date            : 20261001
+*&  Description     : Deklarasi tipe global untuk ZOO_HANDLER_EXAMPLE.
+*&---------------------------------------------------------------------*
+*& Tidak ada DATA REF TO local class di sini: type class belum
+*& dikenal pada titik ini. Ref object ada di include CLS,
+*& setelah ENDCLASS definition.
+*&---------------------------------------------------------------------*
+
+TYPES: BEGIN OF ty_material,
+         matnr TYPE mara-matnr,
+         mtart TYPE mara-mtart,
+         lvorm TYPE mara-lvorm,
+         meins TYPE mara-meins,
+         maktg TYPE makt-maktx,
+       END OF ty_material.
+
+TYPES: ty_t_material TYPE STANDARD TABLE OF ty_material.

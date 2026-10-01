@@ -17,6 +17,10 @@ Each SAP project gets its own folder:
 ## Conventions
 
 - All ABAP deliverables are `.txt` files for SE38 paste-in.
-- All TYPES defined at top (global declaration part); selection screen before class definition.
+- Program structure: INCLUDE per section — `<program>_TOP` (TYPES),
+  `<program>_CLS` (class DEFINITION + global object DATA + IMPLEMENTATION),
+  `<program>_SCR` (selection screen); event blocks in main program.
+- Main program header block: Title / Transaction / Author (Yosua Sirait) /
+  Requester / Date / Description.
 - Classic ABAP syntax only (SAP ECC compatible).
 - Commit per milestone, not per edit.
