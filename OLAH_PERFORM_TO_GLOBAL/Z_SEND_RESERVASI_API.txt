@@ -1,0 +1,178 @@
+*&---------------------------------------------------------------------*
+*& Form F_SEND_TO_API
+*&---------------------------------------------------------------------*
+form f_send_to_api.
+  data: ls_resb_ppk    type ty_resb_ppk,
+        ls_payload     type ty_api_payload,
+        lt_payload_100 type table of ty_api_payload,
+        lv_json        type string,
+        lo_json        type ref to zcl_json_serializer,
+        lo_client      type ref to if_http_client,
+        lv_url         type string,
+        lv_result      type string.
+
+  data: lv_index       type i,
+        lv_index_str   type c length 10,
+        lv_end_index   type i,
+        lv_lines       type i,
+        lv_msg         type string,
+        lv_status_code type i,
+        lv_reason      type string,
+        lv_code        type c length 3,
+        lv_reason_c    type c length 100.
+
+  " Prepare clean payload table matching RESB_PPK (only valid, non-deleted, non-final issue)
+  free gt_payload.
+  loop at gt_resb_ppk into ls_resb_ppk.
+    check ls_resb_ppk-xloek = space and ls_resb_ppk-kzear = space.
+
+    clear ls_payload.
+    ls_payload-rsnum      = ls_resb_ppk-rsnum.
+    ls_payload-rspos      = ls_resb_ppk-rspos.
+    ls_payload-matnr      = ls_resb_ppk-matnr.
+    ls_payload-bdmng      = ls_resb_ppk-bdmng.
+    ls_payload-menge_sisa = ls_resb_ppk-menge_sisa.
+    append ls_payload to gt_payload.
+  endloop.
+
+  lv_lines = lines( gt_payload ).
+  if lv_lines = 0.
+    message 'Tidak ada payload data untuk dikirim' type 'S' display like 'E'.
+    return.
+  endif.
+
+  lv_url = p_url.
+  create object lo_json.
+  lv_index = 1.
+
+  " Batching send data per 100 records
+  while lv_index <= lv_lines.
+    clear: lv_msg, lv_result.
+    free: lt_payload_100, lv_json.
+
+    lv_end_index = lv_index + 99.
+    if lv_end_index > lv_lines.
+      lv_end_index = lv_lines.
+    endif.
+
+    loop at gt_payload into ls_payload from lv_index to lv_end_index.
+      append ls_payload to lt_payload_100.
+    endloop.
+
+    " Step 1: Serialize data to JSON
+    call method lo_json->serialize
+      exporting
+        it_table = lt_payload_100
+      receiving
+        ev_json  = lv_json.
+
+    " Step 2: Create HTTP Client
+    call method cl_http_client=>create_by_url
+      exporting
+        url                = lv_url
+      importing
+        client             = lo_client
+      exceptions
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        others             = 4.
+
+    if sy-subrc <> 0.
+      case sy-subrc.
+        when 1.
+          message 'URL tidak valid (Argument not found)' type 'S' display like 'E'.
+        when 2.
+          message 'ICM/HTTP plugin tidak aktif (Plugin not active)' type 'S' display like 'E'.
+        when 3.
+          message 'Error internal saat membuat HTTP client' type 'S' display like 'E'.
+        when others.
+          message 'Gagal membuat HTTP client (Unknown error)' type 'S' display like 'E'.
+      endcase.
+      return.
+    endif.
+
+    " Step 3: Set HTTP Request Method to POST
+    call method lo_client->request->set_method
+      exporting
+        method = if_http_request=>co_request_method_post.
+
+    " Step 4: Set HTTP Header
+    call method lo_client->request->set_header_field
+      exporting
+        name  = 'Content-Type'
+        value = 'application/json; charset=utf-8'.
+
+    " Step 5: Set JSON Payload Body
+    call method lo_client->request->set_cdata
+      exporting
+        data = lv_json.
+
+    " Step 6: Send Request
+    call method lo_client->send
+      exceptions
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        others                     = 4.
+
+    if sy-subrc <> 0.
+      call method lo_client->close.
+      message 'Gagal komunikasi saat kirim request (Communication failure)' type 'S' display like 'E'.
+      return.
+    endif.
+
+    " Step 7: Receive Response
+    call method lo_client->receive
+      exceptions
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        others                     = 4.
+
+    if sy-subrc <> 0.
+      call method lo_client->close.
+      message 'Gagal menerima response dari server Web' type 'S' display like 'E'.
+      return.
+    endif.
+
+    " Step 8: Read Response Status
+    call method lo_client->response->get_status
+      importing
+        code   = lv_status_code
+        reason = lv_reason.
+
+    lv_code     = lv_status_code.
+    lv_reason_c = lv_reason.
+
+    " Step 9: Read Response Body
+    call method lo_client->response->get_cdata
+      receiving
+        data = lv_result.
+
+    " Step 10: Close Connection
+    call method lo_client->close.
+
+    " Step 11: Output Batch Status Messages
+    lv_index_str = lv_end_index.
+    condense lv_index_str.
+
+    if lv_status_code = 200 or lv_status_code = 201.
+      concatenate 'Batch reservasi s/d record' lv_index_str 'berhasil dikirim. Status:' lv_code
+        into lv_msg separated by space.
+      message lv_msg type 'S'.
+    else.
+      concatenate 'Batch reservasi s/d record' lv_index_str 'gagal. Status:' lv_code lv_reason_c
+        into lv_msg separated by space.
+      message lv_msg type 'S' display like 'E'.
+    endif.
+
+    if lv_result is not initial.
+      clear lv_msg.
+      concatenate 'Response dari server:' lv_result into lv_msg separated by space.
+      message lv_msg type 'S'.
+    endif.
+
+    lv_index = lv_end_index + 1.
+  endwhile.
+endform.                    " F_SEND_TO_API

@@ -1,0 +1,585 @@
+*&---------------------------------------------------------------------*
+*& Class  ZCL_API_SENDER
+*&---------------------------------------------------------------------*
+*&  Title           : Generic JSON sender ke Middleware REST API
+*&  Author          : Yosua Sirait
+*&  Date            : 20261002
+*&  Description     : Menyatukan pola berulang dari ZMM_STOCK,
+*&                    Z_SEND_ABTM_TO_API, Z_SEND_RESERVASI_API, dan
+*&                    ZFM_SEND_LOG_TO_API menjadi satu service class:
+*&                    batching + JSON serialize + HTTP POST + response
+*&                    + log, siap dipakai program lain.
+*&---------------------------------------------------------------------*
+*&  PAKAI CEPAT (satu call: auto-batch + auto log):
+*&
+*&    DATA: lo_api TYPE REF TO zcl_api_sender,
+*&          lv_rc  TYPE i,
+*&          lv_msg TYPE string.
+*&
+*&    CREATE OBJECT lo_api.
+*&
+*&    CALL METHOD lo_api->send_table_generic
+*&      EXPORTING
+*&        iv_url        = 'http://10.90.10.67/restapi/middlewaresap/xxx'
+*&        iv_batch_size = 100         " opsional, default 100
+*&        it_data       = lt_payload  " table of FLAT structure
+*&      IMPORTING
+*&        ev_rc         = lv_rc       " 0 = semua batch sukses
+*&        ev_message    = lv_msg.
+*&
+*&  KETENTUAN:
+*&  - it_data = table of STRUKTUR FLAT (komponen elementer), sama
+*&    seperti pola lama Anda.
+*&  - Field numerik yang perlu di-CONDENSE untuk JSON (mis. labst,
+*&    nabshk): siapkan field TYPE STRING <FIELD>_STR di struktur
+*&    payload Anda dan set iv_json_field = '<FIELD>'. Class mengisi
+*&    <FIELD>_STR dengan nilai ter-CONDENSE lalu kosongkan field
+*&    numeriknya SEBELUM serialize - persis pola lama. Tabel caller
+*&    dipulihkan setelah kirim.
+*&  - URL environment routing (sy-sysid = 'MPD' dsb) tetap urusan
+*&    program pemanggil.
+*&  - Log per batch ditulis ke ZTAPI_SEND_LOG (DDIC creation
+*&    required). Matikan: CREATE OBJECT lo_api
+*&      EXPORTING iv_write_log = space.
+*&---------------------------------------------------------------------*
+
+CLASS zcl_api_sender DEFINITION
+  PUBLIC
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+
+    TYPES: BEGIN OF ty_log,
+             reqid     TYPE char32,
+             tcode     TYPE sy-tcode,
+             repid     TYPE sy-repid,
+             timestamp TYPE char14,
+             endpoint  TYPE char200,
+             batch_no  TYPE i,
+             rec_from  TYPE i,
+             rec_to    TYPE i,
+             rec_count TYPE i,
+             status    TYPE char20,
+             http_code TYPE i,
+             reason    TYPE char100,
+             resp_head TYPE char500,
+             uname     TYPE sy-uname,
+           END OF ty_log.
+
+    TYPES: ty_t_log TYPE STANDARD TABLE OF ty_log
+           WITH DEFAULT KEY.
+
+    METHODS:
+
+*-------------------------------------------------------------------*
+* Constructor: log on/off + nama program pemanggil
+*-------------------------------------------------------------------*
+      constructor
+        IMPORTING
+          iv_write_log TYPE flag DEFAULT 'X',
+          iv_caller    TYPE sy-repid DEFAULT space,
+
+*-------------------------------------------------------------------*
+* High-level: serialize + auto-batch + kirim semua batch + log.
+* Error satu batch TIDAK menghentikan batch berikutnya.
+* it_data tidak berubah isinya setelah call selesai.
+*-------------------------------------------------------------------*
+      send_table_generic
+        IMPORTING
+          iv_url        TYPE string
+          iv_batch_size TYPE i DEFAULT 100
+          iv_json_field TYPE fieldname DEFAULT space
+          it_data       TYPE STANDARD TABLE
+        EXPORTING
+          ev_rc         TYPE i
+          ev_message    TYPE string,
+
+*-------------------------------------------------------------------*
+* Low-level: kirim SATU payload JSON apa adanya (caller yang
+* serialize sendiri / payload custom format).
+*-------------------------------------------------------------------*
+      send_json
+        IMPORTING
+          iv_url       TYPE string
+          iv_json      TYPE string
+        EXPORTING
+          ev_http_code TYPE i
+          ev_resp_body TYPE string
+          ev_error     TYPE string,
+
+*-------------------------------------------------------------------*
+* Ambil log run ini
+*-------------------------------------------------------------------*
+      get_log_entries
+        EXPORTING
+          et_log TYPE ty_t_log,
+
+*-------------------------------------------------------------------*
+* Tulis log ke ZTAPI_SEND_LOG (dipanggil otomatis oleh
+* send_table_generic di akhir)
+*-------------------------------------------------------------------*
+      flush_log.
+
+  PROTECTED SECTION.
+
+    METHODS:
+
+      apply_json_field
+        IMPORTING
+          iv_json_field TYPE fieldname
+        CHANGING
+          ct_data       TYPE STANDARD TABLE.
+
+      write_batch_log
+        IMPORTING
+          iv_endpoint  TYPE string
+          iv_batch_no  TYPE i
+          iv_rec_from  TYPE i
+          iv_rec_to    TYPE i
+          iv_status    TYPE char20
+          iv_http_code TYPE i
+          iv_reason    TYPE string
+          iv_resp      TYPE string.
+
+  PRIVATE SECTION.
+
+    DATA: mt_log       TYPE ty_t_log,
+          mv_write_log TYPE flag,
+          mv_reqid     TYPE char32,
+          mv_caller    TYPE sy-repid.
+
+ENDCLASS.                    "zcl_api_sender DEFINITION
+
+*&---------------------------------------------------------------------*
+*& IMPLEMENTATION (paste ke method source SE24 / include
+*& ZCL_API_SENDER_IMPL)
+*&---------------------------------------------------------------------*
+
+CLASS zcl_api_sender IMPLEMENTATION.
+
+*-------------------------------------------------------------------*
+* Method constructor
+*-------------------------------------------------------------------*
+  METHOD constructor.
+
+    DATA: lv_rand TYPE i.
+
+    mv_write_log = iv_write_log.
+
+    IF iv_caller IS INITIAL.
+      mv_caller = sy-repid.
+    ELSE.
+      mv_caller = iv_caller.
+    ENDIF.
+
+    CALL FUNCTION 'RAND'
+      EXPORTING
+        interval = 999999
+      IMPORTING
+        value    = lv_rand.
+
+    CONCATENATE sy-datum sy-uzeit sy-repid sy-uname lv_rand
+      INTO mv_reqid.
+
+  ENDMETHOD.                "constructor
+
+*-------------------------------------------------------------------*
+* Method send_json (low-level, satu request HTTP)
+*-------------------------------------------------------------------*
+  METHOD send_json.
+
+    DATA: lo_client TYPE REF TO if_http_client,
+          lv_reason TYPE string.
+
+    CLEAR: ev_http_code, ev_resp_body, ev_error.
+
+*   Langkah 1: Buat HTTP client
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = iv_url
+      IMPORTING
+        client             = lo_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+
+    IF sy-subrc = 1.
+      ev_error = 'URL tidak valid (Argument not found)'.
+      RETURN.
+    ELSEIF sy-subrc = 2.
+      ev_error = 'ICM/HTTP plugin tidak aktif (Plugin not active)'.
+      RETURN.
+    ELSEIF sy-subrc = 3.
+      ev_error = 'Error internal saat membuat HTTP client'.
+      RETURN.
+    ELSEIF sy-subrc <> 0.
+      ev_error = 'Gagal membuat HTTP client (Unknown error)'.
+      RETURN.
+    ENDIF.
+
+*   Langkah 2: Set method POST
+*   (Wajib. Tanpa ini request default GET dan body JSON tidak terkirim)
+    CALL METHOD lo_client->request->set_method
+      EXPORTING
+        method = if_http_request=>co_request_method_post.
+
+*   Langkah 3: Header Content-Type
+    CALL METHOD lo_client->request->set_header_field
+      EXPORTING
+        name  = 'Content-Type'
+        value = 'application/json; charset=utf-8'.
+
+*   Langkah 4: Body JSON
+    CALL METHOD lo_client->request->set_cdata
+      EXPORTING
+        data = iv_json.
+
+*   Langkah 5: Send
+    CALL METHOD lo_client->send
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD lo_client->close.
+      CASE sy-subrc.
+        WHEN 1.
+          ev_error = 'Gagal komunikasi saat kirim request (Communication failure)'.
+        WHEN 2.
+          ev_error = 'State tidak valid saat kirim request'.
+        WHEN 3.
+          ev_error = 'Proses kirim request gagal (Processing failed)'.
+        WHEN OTHERS.
+          ev_error = 'Gagal mengirim request (Unknown error)'.
+      ENDCASE.
+      RETURN.
+    ENDIF.
+
+*   Langkah 6: Receive
+    CALL METHOD lo_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD lo_client->close.
+      CASE sy-subrc.
+        WHEN 1.
+          ev_error = 'Gagal komunikasi saat menerima response'.
+        WHEN 2.
+          ev_error = 'State tidak valid saat menerima response'.
+        WHEN 3.
+          ev_error = 'Proses menerima response gagal'.
+        WHEN OTHERS.
+          ev_error = 'Gagal menerima response (Unknown error)'.
+      ENDCASE.
+      RETURN.
+    ENDIF.
+
+*   Langkah 7: Status + body response
+    CALL METHOD lo_client->response->get_status
+      IMPORTING
+        code   = ev_http_code
+        reason = lv_reason.
+
+    CALL METHOD lo_client->response->get_cdata
+      RECEIVING
+        data = ev_resp_body.
+
+    CALL METHOD lo_client->close.
+
+    IF ev_http_code >= 300.
+      CONCATENATE 'HTTP' ev_http_code lv_reason INTO ev_error
+        SEPARATED BY space.
+    ENDIF.
+
+  ENDMETHOD.                "send_json
+
+*-------------------------------------------------------------------*
+* Method apply_json_field
+* Isi field string <FIELD>_STR dengan nilai ter-CONDENSE dari field
+* numerik iv_json_field, lalu kosongkan field numeriknya supaya JSON
+* hanya memuat versi string (persis pola conv-table lama).
+* Dipanggil pada SALINAN lokal tabel, jadi caller tidak terpengaruh.
+*-------------------------------------------------------------------*
+  METHOD apply_json_field.
+
+    FIELD-SYMBOLS: <ls_row> TYPE any,
+                   <fs_num> TYPE any,
+                   <fs_str> TYPE any.
+
+    DATA: lv_str_name TYPE fieldname.
+
+    CHECK NOT iv_json_field IS INITIAL.
+
+    CONCATENATE iv_json_field '_STR' INTO lv_str_name.
+
+*   Validasi nama field pada baris pertama
+    READ TABLE ct_data INDEX 1 ASSIGNING <ls_row>.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    ASSIGN COMPONENT iv_json_field OF STRUCTURE <ls_row> TO <fs_num>.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    ASSIGN COMPONENT lv_str_name OF STRUCTURE <ls_row> TO <fs_str>.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    LOOP AT ct_data ASSIGNING <ls_row>.
+      ASSIGN COMPONENT iv_json_field OF STRUCTURE <ls_row> TO <fs_num>.
+      ASSIGN COMPONENT lv_str_name   OF STRUCTURE <ls_row> TO <fs_str>.
+      <fs_str> = <fs_num>.
+      CONDENSE <fs_str>.
+      CLEAR <fs_num>.
+    ENDLOOP.
+
+  ENDMETHOD.                "apply_json_field
+
+*-------------------------------------------------------------------*
+* Method send_table_generic
+*-------------------------------------------------------------------*
+  METHOD send_table_generic.
+
+    DATA: lo_json       TYPE REF TO zcl_json_serializer,
+          lv_json       TYPE string,
+          lv_lines      TYPE i,
+          lv_index      TYPE i,
+          lv_end_index  TYPE i,
+          lv_batch_size TYPE i,
+          lv_batch_no   TYPE i,
+          lv_http_code  TYPE i,
+          lv_resp       TYPE string,
+          lv_err        TYPE string,
+          lv_msg        TYPE string,
+          lv_fail_batch TYPE i,
+          lv_sent       TYPE i,
+          lv_idx_str    TYPE c LENGTH 10,
+          lv_sent_str   TYPE c LENGTH 12,
+          lv_fail_str   TYPE c LENGTH 6.
+
+    FIELD-SYMBOLS: <lt_work>  TYPE STANDARD TABLE,
+                   <lt_batch> TYPE STANDARD TABLE,
+                   <ls_row>   TYPE any.
+
+    DATA: lr_work  TYPE REF TO data,
+          lr_batch TYPE REF TO data.
+
+    CLEAR: ev_rc, ev_message.
+
+    lv_lines = LINES( it_data ).
+
+    IF lv_lines = 0.
+      ev_rc = 1.
+      ev_message = 'Tidak ada payload data untuk dikirim'.
+      RETURN.
+    ENDIF.
+
+    lv_batch_size = iv_batch_size.
+    IF lv_batch_size <= 0.
+      lv_batch_size = 100.
+    ENDIF.
+
+*   Kerjakan pada SALINAN lokal (caller tidak pernah diubah)
+    CREATE DATA lr_work LIKE it_data.
+    ASSIGN lr_work->* TO <lt_work>.
+    <lt_work> = it_data.
+
+*   Konversi field numerik -> string bila diminta
+    IF NOT iv_json_field IS INITIAL.
+      CALL METHOD apply_json_field
+        EXPORTING
+          iv_json_field = iv_json_field
+        CHANGING
+          ct_data       = <lt_work>.
+    ENDIF.
+
+    lv_index      = 1.
+    lv_batch_no   = 0.
+    lv_fail_batch = 0.
+    lv_sent       = 0.
+    ev_rc         = 0.
+
+    WHILE lv_index <= lv_lines.
+
+      CLEAR: lv_msg, lv_json, lv_err, lv_resp, lv_http_code.
+
+      lv_end_index = lv_index + lv_batch_size - 1.
+      IF lv_end_index > lv_lines.
+        lv_end_index = lv_lines.
+      ENDIF.
+
+      lv_batch_no = lv_batch_no + 1.
+
+*     Potong slice [lv_index .. lv_end_index]
+      CREATE DATA lr_batch LIKE <lt_work>.
+      ASSIGN lr_batch->* TO <lt_batch>.
+      REFRESH <lt_batch>.
+
+      LOOP AT <lt_work> ASSIGNING <ls_row>
+           FROM lv_index TO lv_end_index.
+        APPEND <ls_row> TO <lt_batch>.
+      ENDLOOP.
+
+*     Serialize batch ke JSON
+      CREATE OBJECT lo_json.
+      lv_json = lo_json->serialize( <lt_batch> ).
+
+*     Kirim satu batch
+      CALL METHOD send_json
+        EXPORTING
+          iv_url       = iv_url
+          iv_json      = lv_json
+        IMPORTING
+          ev_http_code = lv_http_code
+          ev_resp_body = lv_resp
+          ev_error     = lv_err.
+
+      lv_idx_str = lv_end_index.
+      CONDENSE lv_idx_str.
+
+      IF lv_err IS INITIAL.
+        lv_sent = lv_sent + ( lv_end_index - lv_index + 1 ).
+        CONCATENATE 'Batch' lv_batch_no 's/d record' lv_idx_str
+                    'sukses (Status:' lv_http_code ')'
+          INTO lv_msg SEPARATED BY space.
+        CALL METHOD write_batch_log
+          EXPORTING
+            iv_endpoint  = iv_url
+            iv_batch_no  = lv_batch_no
+            iv_rec_from  = lv_index
+            iv_rec_to    = lv_end_index
+            iv_status    = 'SUCCESS'
+            iv_http_code = lv_http_code
+            iv_reason    = space
+            iv_resp      = lv_resp.
+      ELSE.
+        lv_fail_batch = lv_fail_batch + 1.
+        CONCATENATE 'Batch' lv_batch_no 's/d record' lv_idx_str
+                    'GAGAL:' lv_err
+          INTO lv_msg SEPARATED BY space.
+        CALL METHOD write_batch_log
+          EXPORTING
+            iv_endpoint  = iv_url
+            iv_batch_no  = lv_batch_no
+            iv_rec_from  = lv_index
+            iv_rec_to    = lv_end_index
+            iv_status    = 'FAILED'
+            iv_http_code = lv_http_code
+            iv_reason    = lv_err
+            iv_resp      = lv_resp.
+*       Kumpulkan pesan error untuk caller
+        IF ev_message IS INITIAL.
+          ev_message = lv_msg.
+        ELSE.
+          CONCATENATE ev_message ' | ' lv_msg INTO ev_message.
+        ENDIF.
+      ENDIF.
+
+*     Log ke spool saat background
+      IF sy-batch = 'X'.
+        WRITE: / lv_msg.
+      ENDIF.
+
+      lv_index = lv_end_index + 1.
+
+    ENDWHILE.
+
+    IF lv_fail_batch > 0.
+      ev_rc = 2.
+      lv_fail_str = lv_fail_batch.
+      CONDENSE lv_fail_str.
+      lv_sent_str = lv_sent.
+      CONDENSE lv_sent_str.
+      CONCATENATE ev_message
+                  ' Total terkirim:' lv_sent_str 'record;'
+                  lv_fail_str 'batch gagal.'
+        INTO ev_message.
+    ELSE.
+      lv_sent_str = lv_sent.
+      CONDENSE lv_sent_str.
+      CONCATENATE 'Semua batch sukses. Total terkirim:'
+                  lv_sent_str 'record.'
+        INTO ev_message.
+    ENDIF.
+
+*   Tulis log ke DB
+    CALL METHOD flush_log.
+
+  ENDMETHOD.                "send_table_generic
+
+*-------------------------------------------------------------------*
+* Method get_log_entries
+*-------------------------------------------------------------------*
+  METHOD get_log_entries.
+
+    CLEAR et_log.
+    et_log[] = mt_log[].
+
+  ENDMETHOD.                "get_log_entries
+
+*-------------------------------------------------------------------*
+* Method flush_log
+*-------------------------------------------------------------------*
+  METHOD flush_log.
+
+    IF mv_write_log IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    IF mt_log IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    MODIFY ztapi_send_log FROM TABLE mt_log.
+
+    IF sy-subrc = 0.
+      COMMIT WORK.
+    ELSE.
+      ROLLBACK WORK.
+    ENDIF.
+
+  ENDMETHOD.                "flush_log
+
+*-------------------------------------------------------------------*
+* Method write_batch_log
+*-------------------------------------------------------------------*
+  METHOD write_batch_log.
+
+    DATA: ls_log   TYPE ty_log,
+          lv_stamp TYPE char14.
+
+    CLEAR ls_log.
+
+    CONCATENATE sy-datum sy-uzeit INTO lv_stamp.
+
+    ls_log-reqid     = mv_reqid.
+    ls_log-tcode     = sy-tcode.
+    ls_log-repid     = mv_caller.
+    ls_log-timestamp = lv_stamp.
+    ls_log-endpoint  = iv_endpoint.
+    ls_log-batch_no  = iv_batch_no.
+    ls_log-rec_from  = iv_rec_from.
+    ls_log-rec_to    = iv_rec_to.
+    ls_log-rec_count = iv_rec_to - iv_rec_from + 1.
+    ls_log-status    = iv_status.
+    ls_log-http_code = iv_http_code.
+    ls_log-reason    = iv_reason.
+    ls_log-resp_head = iv_resp.
+    ls_log-uname     = sy-uname.
+
+    APPEND ls_log TO mt_log.
+
+  ENDMETHOD.                "write_batch_log
+
+ENDCLASS.                    "zcl_api_sender IMPLEMENTATION

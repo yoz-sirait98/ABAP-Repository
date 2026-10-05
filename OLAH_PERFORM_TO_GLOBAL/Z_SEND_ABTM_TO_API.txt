@@ -1,0 +1,239 @@
+*&---------------------------------------------------------------------*
+*& Report  ZTEST_JSON
+*&
+*&---------------------------------------------------------------------*
+*&
+*&
+*&---------------------------------------------------------------------*
+report  z_send_abtm_to_api.
+
+tables : ztrx_abtm.
+
+selection-screen begin of block b1 with frame title text-t01.
+parameters : p_unit type ztrx_abtm-cidunit modif id aa.
+select-options : s_date for ztrx_abtm-ddateabs no-extension no intervals ,
+                 s_nik for ztrx_abtm-cidnik.
+
+selection-screen end of block b1.
+
+types : begin of ty_data,
+          cidemp     type ztrx_abtm-cidemp,
+          cidunit    type ztrx_abtm-cidunit,
+          ddateabs   type ztrx_abtm-ddateabs,
+          cidabscat  type ztrx_abtm-cidabscat,
+          cidabstyp  type ztrx_abtm-cidabstyp,
+          ddatetrx   type ztrx_abtm-ddatetrx,
+          nabshk     type ztrx_abtm-nabshk,
+          cidnik     type ztrx_abtm-cidnik,
+          uname      type ztrx_abtm-uname,
+          udate      type ztrx_abtm-udate,
+          aenam      type ztrx_abtm-aenam,
+          aedat      type ztrx_abtm-aedat,
+        end of ty_data,
+
+        begin of ty_data_conv,
+          cidemp     type ztrx_abtm-cidemp,
+          cidunit    type ztrx_abtm-cidunit,
+          ddateabs   type ztrx_abtm-ddateabs,
+          cidabscat  type ztrx_abtm-cidabscat,
+          cidabstyp  type ztrx_abtm-cidabstyp,
+          ddatetrx   type ztrx_abtm-ddatetrx,
+          nabshk     type string,
+          cidnik     type ztrx_abtm-cidnik,
+          uname      type ztrx_abtm-uname,
+          udate      type ztrx_abtm-udate,
+          aenam      type ztrx_abtm-aenam,
+          aedat      type ztrx_abtm-aedat,
+        end of ty_data_conv.
+
+data: lt_data   type table of ty_data,
+      lt_data_conv type table of ty_data_conv,
+      ls_data type ty_data,
+      ls_data_conv type ty_data_conv,
+      lv_json   type string,
+      lo_json   type ref to zcl_json_serializer,
+      lo_client type ref to if_http_client, " <-- fix di sini
+      lv_url    type string,
+      lv_result type string.
+
+data : lv_counter   type i,
+       lv_index     type i,
+       lv_index_str type c length 6,
+       lv_end_index type i,
+       lv_lines     type i,
+       lv_msg       type string.
+
+"Batching send data per 100 record
+data : lt_data_50 type table of ty_data_conv.
+
+
+* Step 1: Baca data dari table
+select * from ztrx_abtm into corresponding fields of table lt_data
+  where cidunit = p_unit
+    and ddateabs in s_date
+    and cidnik in s_nik.
+
+loop at lt_data into ls_data.
+  move-corresponding ls_data to ls_data_conv.
+  ls_data_conv-nabshk = ls_data-nabshk.
+  condense ls_data_conv-nabshk.
+
+  append ls_data_conv to lt_data_conv.
+  clear ls_data_conv.
+endloop.
+
+
+lv_lines = lines( lt_data_conv ).
+lv_index = 1.
+
+while lv_index <= lv_lines.
+  clear lv_msg.
+  free: lt_data_50, lv_json.
+
+  lv_end_index = lv_index + 49.
+  if lv_end_index > lv_lines.
+    lv_end_index = lv_lines.
+  endif.
+
+  loop at lt_data_conv into ls_data_conv
+     from lv_index to lv_end_index.
+    append ls_data_conv to lt_data_50.
+  endloop.
+
+  lv_index = lv_end_index + 1.
+
+**  DO 100 TIMES.
+**    READ TABLE lt_data_conv INTO ls_data_conv INDEX lv_index.
+**    IF sy-subrc = 0.
+**      APPEND ls_data_conv TO lt_data_50.
+**    ENDIF.
+**    ADD 1 TO lv_index.
+**  ENDDO.
+
+  write lv_index to lv_index_str.
+  lv_index_str = lv_index_str - 1.
+  condense lv_index_str.
+  concatenate 'Batch up to record' lv_index_str 'sent successfully' into lv_msg separated by space.
+  message lv_msg type 'S'.
+
+* Step 2: Serialize data ke JSON
+  create object lo_json.
+  lv_json = lo_json->serialize( lt_data_50 ).
+
+* Step 3: Tentukan URL tujuan
+  if sy-sysid = 'MPD'.
+    lv_url = 'http://10.90.10.60/restapi/middlewaresap/abtmdata'.
+  else.
+    lv_url = 'http://10.90.10.32/restapi/middlewaresap/abtmdata'.
+  endif.
+
+* Step 4: Buat HTTP client
+  call method cl_http_client=>create_by_url
+    exporting
+      url                = lv_url
+    importing
+      client             = lo_client
+    exceptions
+      argument_not_found = 1
+      plugin_not_active  = 2
+      internal_error     = 3
+      others             = 4.
+
+  if sy-subrc = 1.
+    message 'URL tidak valid (Argument not found)' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc = 2.
+    message 'ICM/HTTP plugin tidak aktif (Plugin not active)' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc = 3.
+    message 'Error internal saat membuat HTTP client' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc <> 0.
+    message 'Gagal membuat HTTP client (Unknown error)' type 'S' display like 'E'.
+    continue.
+  endif.
+
+* Step 5: Set HTTP header
+  call method lo_client->request->set_header_field
+    exporting
+      name  = 'Content-Type'
+      value = 'application/json; charset=utf-8'.
+
+* Step 6: Kirim JSON sebagai body POST
+  call method lo_client->request->set_cdata
+    exporting
+      data = lv_json.
+
+* Step 7: Kirim request
+  call method lo_client->send
+    exceptions
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3
+      others                     = 4.
+
+  if sy-subrc = 1.
+    message 'Gagal komunikasi saat kirim request (Communication failure)' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc = 2.
+    message 'State tidak valid saat kirim request' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc = 3.
+    message 'Proses kirim request gagal (Processing failed)' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc <> 0.
+    message 'Gagal mengirim request (Unknown error)' type 'S' display like 'E'.
+    continue.
+  endif.
+
+* Step 8: Terima respon
+  call method lo_client->receive
+    exceptions
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3
+      others                     = 4.
+
+  if sy-subrc = 1.
+    message 'Gagal komunikasi saat menerima response' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc = 2.
+    message 'State tidak valid saat menerima response' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc = 3.
+    message 'Proses menerima response gagal' type 'S' display like 'E'.
+    continue.
+  elseif sy-subrc <> 0.
+    message 'Gagal menerima response (Unknown error)' type 'S' display like 'E'.
+    continue.
+  endif.
+
+* Step 9: Tampilkan hasil dari server
+  data: lv_status_code(3) type i,
+        lv_reason type string,
+        lv_code(3),
+        lv_reason_c(100).
+
+* Ambil status dan alasan dari response (VERSI KLASIK ECC)
+  call method lo_client->response->get_status
+    importing
+      code   = lv_status_code
+      reason = lv_reason.
+  lv_code = lv_status_code.
+  lv_reason_c = lv_reason.
+
+* Ambil isi body response
+  lv_result = lo_client->response->get_cdata( ).
+
+* Tampilkan status
+  concatenate 'Status:' lv_code lv_reason_c into lv_msg separated by space.
+  message lv_msg type 'S'.
+
+* Tampilkan isi response
+  clear lv_msg.
+  concatenate 'Response dari server:' lv_result into lv_msg separated by space.
+  message lv_msg type 'S'.
+
+* Step 10: Bersihkan koneksi
+  call method lo_client->close.
+endwhile.

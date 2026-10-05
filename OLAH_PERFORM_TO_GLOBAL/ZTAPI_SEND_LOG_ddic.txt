@@ -1,0 +1,29 @@
+*&---------------------------------------------------------------------*
+*& Table  ZTAPI_SEND_LOG
+*&---------------------------------------------------------------------*
+*&  Title           : Log pengiriman JSON ke Middleware API
+*&  Author          : Yosua Sirait
+*&  Date            : 20261002
+*&  Description     : Ditulis oleh ZCL_API_SENDER per batch.
+*&                    Buat di SE11 sebagai tabel TRANSPARENT.
+*&---------------------------------------------------------------------*
+*&  SE11 field list (name / type / key):
+*&
+*&    REQID      CHAR 32   KEY   ID request per run pemanggil
+*&    BATCH_NO   INT4      KEY   Nomor batch dalam satu run
+*&    REPID      CHAR 40         Program pemanggil
+*&    TCODE      CHAR 20        Transaction saat kirim
+*&    TIMESTAMP  CHAR 14        YYYYMMDDHHMMSS
+*&    ENDPOINT   CHAR 200       URL tujuan
+*&    REC_FROM   INT4            Record awal batch
+*&    REC_TO     INT4            Record akhir batch
+*&    REC_COUNT  INT4            Jumlah record batch
+*&    STATUS     CHAR 20         SUCCESS / FAILED
+*&    HTTP_CODE  INT4            Status HTTP (0 = gagal sebelum kirim)
+*&    REASON     CHAR 100        Reason / pesan error
+*&    RESP_HEAD  CHAR 500       Potongan awal body response
+*&    UNAME      CHAR 12         User
+*&
+*&  Technical settings: Entry read / APPL0, Standard table.
+*&  Generate & activate di SE11, lalu SE14 create.
+*&---------------------------------------------------------------------*

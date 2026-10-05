@@ -1,0 +1,14 @@
+*&---------------------------------------------------------------------*
+*&  Include  ZAPI_SENDER_DEMO_SCR
+*&---------------------------------------------------------------------*
+*&  Title           : Selection Screen
+*&  Author          : Yosua Sirait
+*&  Date            : 20261002
+*&  Description     : Parameter sama seperti Z_SEND_ABTM_TO_API.
+*&---------------------------------------------------------------------*
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-001.
+  PARAMETERS:   p_unit  TYPE ztrx_abtm-cidunit MODIF ID aa.
+  SELECT-OPTIONS: s_date FOR ztrx_abtm-ddateabs NO-EXTENSION NO INTERVALS,
+                  s_nik  FOR ztrx_abtm-cidnik.
+SELECTION-SCREEN END OF BLOCK b1.

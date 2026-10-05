@@ -1,0 +1,26 @@
+*&---------------------------------------------------------------------*
+*& Report  ZAPI_SENDER_DEMO
+*&---------------------------------------------------------------------*
+*&  Title           : Demo pemakaian ZCL_API_SENDER
+*&  Transaction     : None (test)
+*&  Author          : Yosua Sirait
+*&  Requester       : Yosua Sirait
+*&  Date            : 20261002
+*&  Description     : Contoh program pemakai ZCL_API_SENDER mengirim
+*&                    ZTRX_ABTM ke middleware (pengganti
+*&                    Z_SEND_ABTM_TO_API yang copy-paste HTTP).
+*&---------------------------------------------------------------------*
+REPORT zapi_sender_demo NO STANDARD PAGE HEADING.
+
+INCLUDE zapi_sender_demo_top.
+INCLUDE zapi_sender_demo_cls.
+INCLUDE zapi_sender_demo_scr.
+
+*---------------------------------------------------------------------*
+* Event block
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+  CREATE OBJECT go_app.
+
+  CALL METHOD go_app->run.

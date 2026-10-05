@@ -1,0 +1,635 @@
+************************************************************************
+**  NAME          : ZSTOCKLST                                         **
+**  Date of birth : 07 Oktober 2001                                   **
+**  Author        : Rizky R Nugroho                                   **
+**  Desc          : Material Stock List                               **
+**                : MCHA --> MCHB --> MARD --> MBEW                   **
+**  Modification  :                                                   **
+**                  Add Sub total for each Material                   **
+**                  Line Numbering Modification                       **
+**                  Delete Indicator                                  **
+************************************************************************
+*REPORT zmtrllst NO STANDARD PAGE HEADING LINE-SIZE 111.
+report zmtrllst no standard page heading line-size 129.
+
+tables : mbew,mchb,mard,makt,mara,mcha,t001w,  t006.
+
+select-options: lgort for mard-lgort,
+                matnr for mard-matnr,
+                werks for t001w-werks.
+
+parameter : zerol as checkbox,
+            stk_cnsg as checkbox.
+
+data:  begin of idata occurs 1,
+          bwkey   like mbew-bwkey,       "Plant"
+          lgort   like mard-lgort,       "Storage Location"
+          bwtar   like mbew-bwtar,       "Batch"
+          matnr   like mchb-matnr,       "Material number"
+          lbkum   like mbew-lbkum,       "restricted from MCHB"
+          salk3   like mbew-salk3,       "Total value"
+          clabs   like mchb-clabs,       "Qty in detail"
+          tprice  like mbew-salk3,       "Calculated Price"
+          labst   like mard-labst,       "Restricted from MARD"
+          vprsv   like mbew-vprsv,       "Price control"
+          verpr   like mbew-verpr,       "Mov. Avg. Price"
+          stprs   like mbew-stprs,       "Standart Price"
+          lvorm   like mbew-lvorm,
+          dflag(1) type c,   "different of MARD and MBEW flag"
+      end of idata,
+      idatawa like idata,
+      zwerks like mard-werks,
+      begin of ibatch occurs 0,
+           matnr like mcha-matnr,
+           werks like mcha-werks,
+           charg like mcha-charg,
+           bwtar like mcha-bwtar,
+      end of ibatch,
+      ibatchwa like ibatch,
+      begin of iresult occurs 0,
+           werks like ibatch-werks,
+           lgort like mchb-lgort,
+           matnr like ibatch-matnr,
+           bwtar like ibatch-bwtar,
+           charg like ibatch-charg,
+           clabs like mchb-clabs,
+           vprsv like mbew-vprsv,
+           verpr like mbew-verpr,
+           stprs like mbew-stprs,
+           salk3 like mbew-salk3,
+           lbkum like mbew-lbkum,
+           lvorm like mbew-lvorm,
+           value(15) type p decimals 2,"like mbew-salk3,
+           sobkz like mkol-sobkz,
+       end of iresult,
+       begin of imard occurs 0,
+           matnr like mard-matnr,
+           werks like mard-werks,
+           lgort like mard-lgort,
+           labst like mard-labst,
+           lvorm like mard-lvorm,
+       end of imard,
+       grandtotal(16) type p decimals 2,
+       grandqty(16) type p decimals 3,
+       g_authchk.
+data: begin of i_t006 occurs 0,
+      msehi like t006-msehi,
+      andec like t006-andec,
+end of i_t006.
+
+start-of-selection.
+  perform check_authorization.
+  check g_authchk = 0.
+  perform get_batch_master_config.
+  perform further_calculation.
+*    PERFORM DISPLAY_DATA.
+  perform show_data.
+
+top-of-page.
+  write: / 'Material Stock List',
+         / 'Plant  : ', zwerks.
+  format color col_heading.
+  if stk_cnsg <> 'X'.
+    write:/ sy-uline(114).
+    write:/ sy-vline no-gap,
+           (6)  'No.' no-gap, sy-vline no-gap,
+           (10) 'Material' no-gap, sy-vline no-gap,
+           (40) 'Description' no-gap, sy-vline no-gap,
+           (4)  'UoM' no-gap, sy-vline no-gap,
+           (10) 'Batch' centered no-gap, sy-vline no-gap,
+           (17) 'Current' centered no-gap, sy-vline no-gap,
+           (18) 'Current value' centered no-gap, 114 sy-vline no-gap,
+           sy-uline(114).
+  else.
+    write:/ sy-uline(129), sy-vline no-gap,
+           (6)  'No.' no-gap, sy-vline no-gap,
+           (10) 'Material' no-gap, sy-vline no-gap,
+           (40) 'Description' no-gap, sy-vline no-gap,
+           (4)  'UoM' no-gap, sy-vline no-gap,
+           (10) 'Batch' centered no-gap, sy-vline no-gap,
+           (18) 'Current' centered no-gap, sy-vline no-gap,
+           (18) 'Current value' centered no-gap, sy-vline no-gap,
+           (14) 'Special stock' centered no-gap, sy-vline no-gap,
+              sy-uline(129).
+  endif.
+*&---------------------------------------------------------------------*
+*&      Form  ENDING
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_TOTPRICE  text
+*----------------------------------------------------------------------*
+form ending using    p_totprice p_qty.
+  format color col_total.
+  if stk_cnsg <> 'X'.
+    write: / sy-uline(114),
+           / sy-vline no-gap, 'Total Storage location ',
+             iresult-lgort,
+             89 p_totprice no-gap right-justified,
+*           71 p_qty NO-GAP RIGHT-JUSTIFIED,
+             73 p_qty no-gap right-justified,
+             114 sy-vline no-gap,
+           / sy-uline(114).
+  else.
+    write: / sy-uline,
+           / sy-vline no-gap, 'Total Storage location ',
+             iresult-lgort,
+             89 p_totprice no-gap right-justified,
+*           71 p_qty NO-GAP RIGHT-JUSTIFIED,
+             73 p_qty no-gap right-justified,
+             129 sy-vline no-gap,
+           / sy-uline.
+  endif.
+  add p_totprice to grandtotal.
+  add p_qty to grandqty.
+
+endform.                    " ENDING
+*&---------------------------------------------------------------------*
+*&      Form  GET_BATCH_MASTER_CONFIG
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+form get_batch_master_config.
+
+*Material which have batch"
+  select matnr werks charg bwtar
+  into corresponding fields of ibatch
+  from mcha where
+     matnr in  matnr and
+     werks in werks.
+    append ibatch.
+  endselect.
+
+*Material which have no batch"
+  select matnr werks lgort labst lvorm into corresponding fields of imard
+                       from mard
+                       where matnr in matnr and
+                             werks in werks.
+    read table ibatch with key matnr = imard-matnr
+                              werks = imard-werks.
+    check sy-subrc ne 0.
+    append imard.
+  endselect.
+
+*Read price, Tot QTY and else"
+  select matnr bwkey bwtar lbkum salk3 vprsv verpr stprs lvorm
+  into corresponding fields of idata
+  from mbew
+  where matnr in matnr and bwkey in werks.
+    read table ibatch with key matnr = idata-matnr
+                               werks = idata-bwkey.
+    check sy-subrc ne 0.
+    append idata.
+  endselect.
+
+endform.                    " GET_BATCH_MASTER_CONFIG
+*&---------------------------------------------------------------------*
+*&      Form  FURTHER_CALCULATION
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+form further_calculation.
+*material with batch"
+  loop at ibatch into ibatchwa.
+    clear iresult.
+    move-corresponding ibatchwa to iresult.
+    select lgort clabs into corresponding fields of iresult
+    from mchb where matnr eq ibatchwa-matnr and
+                    werks eq ibatchwa-werks and
+                    charg eq ibatchwa-charg.
+      select single vprsv verpr stprs salk3 lbkum lvorm
+             into corresponding fields of iresult from mbew
+             where matnr eq ibatchwa-matnr and bwkey eq ibatchwa-werks
+             and bwtar eq space. "icatchwa-bwtar.
+      if iresult-vprsv eq 'V'.
+        if iresult-lbkum ne 0.
+          iresult-value = iresult-clabs *
+                          ( iresult-salk3 / iresult-lbkum )  * 100.
+        else.
+          iresult-value = 0.
+        endif.
+      else.
+        iresult-value = iresult-clabs * iresult-stprs * 100.
+      endif.
+      if iresult-sobkz = 'K'.
+        if iresult-clabs <> 0.
+          if iresult-value = 0.
+            append iresult.
+          endif.
+        endif.
+      else.
+        append iresult.
+      endif.
+      if stk_cnsg = 'X'.
+*    SELECT matnr werks lgort charg sobkz lifnr slabs
+        select sobkz slabs into (iresult-sobkz, iresult-clabs )
+        from mkol
+        where matnr eq ibatchwa-matnr and
+                        werks eq ibatchwa-werks and
+                        lgort = iresult-lgort and
+                        charg eq ibatchwa-charg.
+          iresult-value = 0.
+          append iresult.
+        endselect.
+      endif.
+    endselect.
+  endloop.
+
+*material which have no batch"
+  data: dumm type c, zverpr(12) type p decimals 7. " like mbew-verpr.
+  loop at imard.
+    clear iresult.
+*  IF IDATA-MATNR EQ '000000000020000299'. "for debug"
+*  MOVE 'X' TO DUMM.
+*  ENDIF.
+    move: imard-matnr to iresult-matnr,
+          imard-werks to iresult-werks,
+          imard-lgort to iresult-lgort,
+          imard-lvorm to iresult-lvorm.
+
+    read table idata with key matnr = iresult-matnr
+                              bwkey = iresult-werks.
+    if sy-subrc eq 0.
+      move: idata-vprsv to iresult-vprsv,
+            idata-verpr to iresult-verpr,
+            idata-stprs to iresult-stprs.
+
+      if imard-labst < idata-lbkum.
+        move: imard-labst to iresult-clabs.
+        if iresult-vprsv eq 'V'.
+          if idata-lbkum ne 0.
+            zverpr = ( idata-salk3 / idata-lbkum ).
+          else.
+            zverpr = 0.
+          endif.
+          iresult-value = iresult-clabs * zverpr * 100.
+        else.
+          iresult-value = iresult-clabs * iresult-stprs * 100.
+        endif.
+      else.
+        move idata-lbkum to iresult-clabs.
+        iresult-value = idata-salk3 * 100.
+      endif.
+* ---> Start of insertion ---> 04.03.2005
+    else.
+      move: imard-labst to iresult-clabs.
+      iresult-value = iresult-clabs * iresult-stprs * 100.
+* ---> End of insertion -----> 04.03.2005
+    endif.
+    append iresult.
+    if stk_cnsg = 'X'.
+*    SELECT matnr werks lgort charg sobkz lifnr slabs
+      select sobkz slabs into (iresult-sobkz, iresult-clabs )
+      from mkol
+      where matnr eq imard-matnr and
+                      werks eq imard-werks and
+                      lgort = imard-lgort and
+                      charg = ' '.
+        iresult-value = 0.
+        append iresult.
+      endselect.
+    endif.
+  endloop.
+
+endform.                    " FURTHER_CALCULATION
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+*FORM display_data.
+*  DATA: printed(1) TYPE c,lnum(6) TYPE i,totprice(12) TYPE p DECIMALS 2
+*,
+*        totqty(10) TYPE p DECIMALS 3,
+*        old_matnr LIKE iresult-matnr, new_matnr LIKE iresult-matnr,
+*        rec_count TYPE p, mclabs(10) TYPE p DECIMALS 3,
+*        mvalue(12) TYPE p DECIMALS 2.
+*
+*  SORT iresult BY werks lgort matnr bwtar charg.
+*  lnum = 0.
+*  LOOP AT iresult WHERE lgort IN lgort.
+*    ADD: iresult-value TO totprice,
+*         iresult-clabs TO totqty.
+*    MOVE iresult-matnr TO new_matnr.
+*    IF old_matnr IS INITIAL.
+*      MOVE iresult-matnr TO old_matnr.
+*      MOVE: 1 TO rec_count,
+*            iresult-clabs TO mclabs,
+*            iresult-value TO mvalue.
+*    ELSE.
+*      IF new_matnr EQ old_matnr.
+*        ADD: 1 TO rec_count,
+*             iresult-clabs TO mclabs,
+*             iresult-value TO mvalue.
+*      ELSE.
+*        MOVE new_matnr TO old_matnr.
+*        MOVE: 1 TO rec_count,
+*              iresult-clabs TO mclabs,
+*              iresult-value TO mvalue.
+*      ENDIF.
+*    ENDIF.
+*    AT NEW werks.
+*      MOVE iresult-werks TO zwerks.
+*      IF NOT printed IS INITIAL. "/not at first page"
+*        WRITE: / sy-uline.
+*        NEW-PAGE.
+*      ENDIF.
+*    ENDAT.
+*    AT NEW lgort.
+*      IF NOT printed IS INITIAL.
+*        WRITE: / sy-uline.
+*      ENDIF.
+*      FORMAT COLOR COL_GROUP.
+*      WRITE: / sy-vline NO-GAP, 'Storage Location : ',iresult-lgort,
+*               114 sy-vline NO-GAP,
+*               sy-uline.
+*      lnum = 0.
+*    ENDAT.
+*    IF zerol EQ 'X'.
+*      IF iresult-clabs EQ 0 AND iresult-value EQ 0.
+*        AT END OF lgort.
+*          PERFORM ending USING totprice totqty.
+*          CLEAR: totprice,totqty.
+*        ENDAT.
+*        CONTINUE.
+*      ENDIF.
+*    ENDIF.
+*    printed = 'X'. ADD 1 TO lnum.
+*    SELECT SINGLE meins INTO mara-meins FROM mara
+*    WHERE matnr EQ iresult-matnr.
+*    SELECT SINGLE * FROM  makt
+*           WHERE  matnr = iresult-matnr AND spras = sy-langu.
+*    FORMAT COLOR COL_NORMAL.
+*    WRITE: / sy-vline NO-GAP,
+*          (6)  lnum NO-GAP NO-ZERO, sy-vline NO-GAP,
+*          (10) iresult-matnr NO-GAP, sy-vline NO-GAP,
+*          (40) makt-maktx NO-GAP, sy-vline NO-GAP,
+*          (4)  mara-meins NO-GAP, sy-vline NO-GAP,
+*          (10) iresult-charg NO-GAP, sy-vline NO-GAP,
+*          (17) iresult-clabs NO-GAP DECIMALS 2, sy-vline NO-GAP,
+*          (18) iresult-value NO-GAP DECIMALS 2, sy-vline NO-GAP.
+*    AT END OF matnr.
+*      IF rec_count GT 1.
+*        PERFORM tot_material USING mclabs old_matnr mvalue d_andec.
+*        CLEAR: rec_count,mclabs,mvalue,old_matnr.
+*      ENDIF.
+*    ENDAT.
+*    AT END OF lgort.
+*      PERFORM ending USING totprice totqty.
+*      CLEAR: totprice,totqty.
+*      CLEAR: rec_count,mclabs,mvalue,old_matnr.
+*    ENDAT.
+*  ENDLOOP.
+*  PERFORM grand_tot.
+*
+*
+*ENDFORM.                    " DISPLAY_DATA
+*&---------------------------------------------------------------------*
+*&      Form  GRAND_TOT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+form grand_tot.
+  format color col_total.
+  if stk_cnsg <> 'X'.
+    write: / sy-uline(114),
+           / sy-vline no-gap, 'Grand total : ',
+*           78 grandtotal NO-GAP RIGHT-JUSTIFIED DECIMALS 2,
+             81 grandtotal no-gap right-justified decimals 2,
+*           59 grandqty NO-GAP RIGHT-JUSTIFIED DECIMALS 3,
+             61 grandqty no-gap right-justified decimals 3,
+             114 sy-vline no-gap,
+           / sy-uline(114).
+  else.
+    write: / sy-uline,
+           / sy-vline no-gap, 'Grand total : ',
+*           78 grandtotal NO-GAP RIGHT-JUSTIFIED DECIMALS 2,
+             81 grandtotal no-gap right-justified decimals 2,
+*           59 grandqty NO-GAP RIGHT-JUSTIFIED DECIMALS 3,
+             61 grandqty no-gap right-justified decimals 3,
+             129 sy-vline no-gap,
+           / sy-uline.
+  endif.
+endform.                    " GRAND_TOT
+*&---------------------------------------------------------------------*
+*&      Form  TOT_MATERIAL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_MCLABS  text
+*----------------------------------------------------------------------*
+form tot_material using    p_mclabs p_old_matnr p_mvalue p_andec.
+  format color col_key.
+  if stk_cnsg <> 'X'.
+    write: / sy-vline no-gap,
+             7 'Total For Material : ', p_old_matnr,
+             89 p_mvalue no-gap right-justified,
+*             73 p_mclabs decimals p_andec NO-GAP RIGHT-JUSTIFIED,
+             73 p_mclabs decimals 3 no-gap right-justified,
+             114 sy-vline no-gap.
+  else.
+    write: / sy-vline no-gap,
+             7 'Total For Material : ', p_old_matnr,
+             89 p_mvalue no-gap right-justified,
+*             73 p_mclabs decimals p_andec NO-GAP RIGHT-JUSTIFIED,
+             73 p_mclabs decimals 3 no-gap right-justified,
+             129 sy-vline no-gap.
+  endif.
+endform.                    " TOT_MATERIAL
+*&---------------------------------------------------------------------*
+*&      Form  SHOW_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+form show_data.
+  data: printed(1) type c,lnum(6) type i,totprice(12) type p decimals 2,
+        totqty(10) type p decimals 3,
+        old_matnr like iresult-matnr, new_matnr like iresult-matnr,
+        rec_count type p, mclabs(10) type p decimals 3,
+        mvalue(12) type p decimals 2, calnum(6) type i,
+        d_andec like t006-andec,
+        lv_uname like sy-uname.
+
+  if zerol eq 'X'.
+    delete iresult where clabs eq 0 and value eq 0.
+  endif.
+*  IF dele EQ 'X'.
+*    DELETE iresult WHERE lvorm IS initial.
+*  ELSE.
+  delete iresult where lvorm eq 'X'.
+
+*  ENDIF.
+*{   INSERT         SP1K902326                                        1
+*//Add MichaelT 20081222
+  data: v_lvorm like mara-lvorm.
+  loop at iresult.
+    clear v_lvorm.
+    select single lvorm into v_lvorm from mara where matnr = iresult-matnr.
+    if v_lvorm = 'X'.
+      delete iresult.
+    endif.
+  endloop.
+*//End Add MichaelT 20081222
+*}   INSERT
+*  SORT iresult BY werks lgort matnr bwtar charg.
+
+  if lgort is not initial.
+      delete iresult where lgort not in lgort.
+  endif.
+
+
+
+  sort iresult by werks lgort matnr sobkz bwtar charg.
+  lnum = 0.
+  loop at iresult." WHERE lgort IN lgort.
+    at new werks.
+      move iresult-werks to zwerks.
+      if not printed is initial. "/not at first page"
+        if stk_cnsg <> 'X'.
+          write: / sy-uline(114).
+        else.
+          write: / sy-uline.
+        endif.
+        new-page.
+      endif.
+    endat.
+    at new lgort.
+      if not printed is initial.
+        if stk_cnsg <> 'X'.
+          write: / sy-uline(114).
+        else.
+          write: / sy-uline.
+        endif.
+      endif.
+      format color col_group.
+      if stk_cnsg <> 'X'.
+        write: / sy-vline no-gap, 'Storage Location : ',iresult-lgort,
+                 114 sy-vline no-gap,
+                 sy-uline(114).
+      else.
+        write: / sy-vline no-gap, 'Storage Location : ',iresult-lgort,
+                 129 sy-vline no-gap,
+                 sy-uline.
+      endif.
+      lnum = 1.
+    endat.
+
+    "/check for user KRANI"
+*   Edited by Eddy on 08.08.2014 (solman 183360)
+*   -------------------------------------------------
+***    IF sy-uname CS 'KRN' OR
+***       sy-uname CS 'KRANI'.
+***      CLEAR iresult-value.
+***    ENDIF.
+
+    lv_uname = sy-uname.
+    if lv_uname+5(3) cs 'KRN' or
+       lv_uname+5(5) cs 'KRANI'.
+      clear iresult-value.
+    endif.
+*   -------------------------------------------------
+
+    add: iresult-value to totprice,
+         iresult-clabs to totqty.
+    move iresult-matnr to new_matnr.
+    if old_matnr is initial.
+      move iresult-matnr to old_matnr.
+      move: 1 to rec_count,
+            1 to calnum,
+            iresult-clabs to mclabs,
+            iresult-value to mvalue.
+    else.
+      if new_matnr eq old_matnr.
+        clear calnum.
+        add: 1 to rec_count,
+             iresult-clabs to mclabs,
+             iresult-value to mvalue.
+      else.
+        if not printed is initial.
+          add 1 to lnum.
+          move lnum to calnum.
+        endif.
+        move new_matnr to old_matnr.
+        move: 1 to rec_count,
+              iresult-clabs to mclabs,
+              iresult-value to mvalue.
+      endif.
+    endif.
+    printed = 'X'.
+    select single meins into mara-meins from mara
+    where matnr eq iresult-matnr.
+    select single * from  makt
+           where  matnr = iresult-matnr and spras = sy-langu.
+    format color col_normal.
+    write: / sy-vline no-gap,
+          (6)  calnum no-gap no-zero, sy-vline no-gap,
+          (10) iresult-matnr no-gap, sy-vline no-gap,
+          (40) makt-maktx no-gap, sy-vline no-gap,
+          (4)  mara-meins no-gap, sy-vline no-gap,
+          (10) iresult-charg no-gap, sy-vline no-gap.
+*    select single msehi andec from t006 into i_t006
+*        where msehi = mara-meins.
+*    move i_t006-andec to d_andec.
+    if iresult-clabs ne 0.
+*      write: (17) iresult-clabs decimals i_t006-andec, sy-vline no-gap,
+      write: (17) iresult-clabs decimals 3, sy-vline no-gap,
+            (18) iresult-value no-gap decimals 2, sy-vline no-gap.
+    else.
+      write: (17) iresult-clabs decimals 0, sy-vline no-gap,
+            (18) iresult-value no-gap decimals 2, sy-vline no-gap.
+    endif.
+    if stk_cnsg       = 'X'.
+      write : (13) iresult-sobkz, sy-vline no-gap.
+    endif.
+    at end of matnr.
+      if rec_count gt 1.
+        perform tot_material using mclabs old_matnr mvalue d_andec.
+        clear: rec_count,mclabs,mvalue. ",old_matnr.
+      endif.
+    endat.
+    at end of lgort.
+      perform ending using totprice totqty.
+      clear: totprice,totqty.
+      clear: rec_count,mclabs,mvalue,old_matnr.
+    endat.
+  endloop.
+  perform grand_tot.
+
+
+
+endform.                    " SHOW_DATA
+*&---------------------------------------------------------------------*
+*&      Form  check_authorization
+*&---------------------------------------------------------------------*
+form check_authorization.
+  data: l_werks like t001w-werks.
+
+  clear g_authchk.
+  select werks into l_werks
+    from t001w
+    where werks in werks.
+    authority-check object 'M_MSEG_WMB'
+             id 'ACTVT' dummy
+             id 'WERKS' field l_werks.
+    if sy-subrc <> 0.
+      g_authchk = sy-subrc.
+      message s000(es) with 'Please check your authorization'.
+      exit.
+    endif.
+  endselect.
+endform.                    " check_authorization

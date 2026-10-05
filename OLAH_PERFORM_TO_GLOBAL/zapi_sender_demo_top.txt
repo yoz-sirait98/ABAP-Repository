@@ -1,0 +1,27 @@
+*&---------------------------------------------------------------------*
+*&  Include  ZAPI_SENDER_DEMO_TOP
+*&---------------------------------------------------------------------*
+*&  Title           : Global TYPES + tabel untuk include CLS
+*&  Author          : Yosua Sirait
+*&  Date            : 20261002
+*&  Description     : Payload struct (num -> string _STR seperti
+*&                    pola conv lama) dan object ref class.
+*&---------------------------------------------------------------------*
+
+TYPES: BEGIN OF ty_payload,
+         cidemp     TYPE ztrx_abtm-cidemp,
+         cidunit    TYPE ztrx_abtm-cidunit,
+         ddateabs   TYPE ztrx_abtm-ddateabs,
+         cidabscat  TYPE ztrx_abtm-cidabscat,
+         cidabstyp  TYPE ztrx_abtm-cidabstyp,
+         ddatetrx   TYPE ztrx_abtm-ddatetrx,
+         nabshk     TYPE ztrx_abtm-nabshk,
+         nabshk_str TYPE string,
+         cidnik     TYPE ztrx_abtm-cidnik,
+         uname      TYPE ztrx_abtm-uname,
+         udate      TYPE ztrx_abtm-udate,
+         aenam      TYPE ztrx_abtm-aenam,
+         aedat      TYPE ztrx_abtm-aedat,
+       END OF ty_payload.
+
+TYPES: ty_t_payload TYPE STANDARD TABLE OF ty_payload.

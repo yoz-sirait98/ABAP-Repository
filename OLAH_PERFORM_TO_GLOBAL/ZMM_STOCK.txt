@@ -1,0 +1,277 @@
+*&---------------------------------------------------------------------*
+*& Form SEND_TO_WEB
+*&---------------------------------------------------------------------*
+*& Mengonversi data output ke JSON dan mengirim ke Middleware REST API
+*& Pengiriman data bertahap (batch) 5000 rekaman per request HTTP
+*& URL Tujuan: http://10.90.10.67/restapi/middlewaresap/stokfzdata
+*&---------------------------------------------------------------------*
+FORM send_to_web.
+  DATA: lt_data_conv TYPE STANDARD TABLE OF ty_data_conv,
+        ls_data_conv TYPE ty_data_conv,
+        lt_data_5000  TYPE STANDARD TABLE OF ty_data_conv.
+
+  DATA: lo_json   TYPE REF TO zcl_json_serializer,
+        lo_client TYPE REF TO if_http_client,
+        lv_json   TYPE string,
+        lv_url    TYPE string,
+        lv_result TYPE string.
+
+  DATA: lv_lines      TYPE i,
+        lv_index      TYPE i,
+        lv_counter    TYPE i,
+        lv_end_index  TYPE i,
+        lv_index_str  TYPE c LENGTH 6,
+        lv_msg        TYPE string,
+        lv_total_sent TYPE i,
+        lv_tot_str    TYPE c LENGTH 10,
+        lv_tot_msg    TYPE string.
+
+  DATA: lv_status_code TYPE i,
+        lv_reason      TYPE string,
+        lv_code        TYPE c LENGTH 3,
+        lv_reason_c    TYPE c LENGTH 100.
+
+  " --- Variabel untuk mengukur waktu eksekusi ---
+  DATA: lv_start_time TYPE i,
+        lv_end_time   TYPE i,
+        lv_duration   TYPE i,
+        lv_sec        TYPE i,
+        lv_time_t     TYPE t,          " <<< untuk HH:MM:SS
+        lv_tot_sec_c(10),       " <<< untuk total detik
+        lv_time_str(10),
+        lv_time_msg   TYPE string.
+
+  IF gt_output IS INITIAL.
+    MESSAGE 'No stock data found to send.' TYPE 'S' DISPLAY LIKE 'E'.
+    EXIT.
+  ENDIF.
+
+  " >>> Mulai hitung waktu eksekusi
+  GET RUN TIME FIELD lv_start_time.
+
+  " Konversi tabel output ke struktur JSON (merapikan spasi pada jumlah dan harga)
+  CLEAR : lv_index, lv_lines, lt_data_conv.
+
+  lv_lines      = LINES( gt_output ).
+
+  LOOP AT gt_output INTO gs_output.
+    CLEAR ls_data_conv.
+    lv_index = lv_index + 1.
+    ls_data_conv-mandt = sy-mandt.
+    ls_data_conv-werks = gs_output-werks.
+    ls_data_conv-lgort = gs_output-lgort.
+    WRITE gs_output-matnr TO ls_data_conv-matnr NO-ZERO.
+    CONDENSE ls_data_conv-matnr.
+
+    ls_data_conv-maktg = gs_output-maktg.
+    ls_data_conv-bwtar = gs_output-bwtar.
+    ls_data_conv-mtart = gs_output-mtart.
+    ls_data_conv-matkl = gs_output-matkl.
+    ls_data_conv-meins = gs_output-meins.
+
+    WRITE gs_output-labst TO ls_data_conv-labst UNIT gs_output-meins.
+    CONDENSE ls_data_conv-labst.
+
+    WRITE gs_output-verpr TO ls_data_conv-verpr CURRENCY gs_output-waers.
+    CONDENSE ls_data_conv-verpr.
+
+    IF lv_lines = lv_index.
+      ls_data_conv-lsbatch = gs_output-lsbatch = 'Y'.
+    ENDIF.
+
+    APPEND ls_data_conv TO lt_data_conv.
+
+    MODIFY gt_output FROM gs_output TRANSPORTING lsbatch.
+  ENDLOOP.
+
+  lv_lines      = LINES( lt_data_conv ).
+  lv_index      = 1.
+  lv_total_sent = 0.
+
+  IF sy-sysid = 'MPD'.
+    lv_url        = 'http://10.90.5.22/restapi/middlewaresap/stokfzdata'.
+  ELSE.
+    lv_url        = 'http://10.90.10.32/restapi/middlewaresap/stokfzdata'.
+  ENDIF.
+
+  WHILE lv_index <= lv_lines.
+    CLEAR: lv_msg, lv_json.
+    REFRESH: lt_data_5000.
+
+    lv_end_index = lv_index + 4999.
+    IF lv_end_index > lv_lines.
+      lv_end_index = lv_lines.
+    ENDIF.
+
+    LOOP AT lt_data_conv INTO ls_data_conv
+         FROM lv_index TO lv_end_index.
+      APPEND ls_data_conv TO lt_data_5000.
+    ENDLOOP.
+
+    CLEAR lv_index_str.
+    WRITE lv_end_index TO lv_index_str.
+    CONDENSE lv_index_str.
+    CONCATENATE 'Kirim data :' lv_index_str INTO lv_msg SEPARATED BY space.
+    MESSAGE lv_msg TYPE 'S'.
+
+    lv_index = lv_end_index + 1.
+
+    " Langkah 1: Serialisasi data ke JSON
+    CREATE OBJECT lo_json.
+    lv_json = lo_json->serialize( lt_data_5000 ).
+
+    " Langkah 2: Buat HTTP Client
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = lv_url
+      IMPORTING
+        client             = lo_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+
+    IF sy-subrc = 1.
+      lv_msg = 'URL tidak valid (Argument not found)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc = 2.
+      lv_msg = 'ICM/HTTP plugin tidak aktif (Plugin not active)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc = 3.
+      lv_msg = 'Error internal saat membuat HTTP client'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc <> 0.
+      lv_msg = 'Gagal membuat HTTP client (Unknown error)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ENDIF.
+
+    " Langkah 3: Atur Field Header
+    CALL METHOD lo_client->request->set_header_field
+      EXPORTING
+        name  = 'Content-Type'
+        value = 'application/json; charset=utf-8'.
+
+    " Langkah 4: Atur Body HTTP
+    CALL METHOD lo_client->request->set_cdata
+      EXPORTING
+        data = lv_json.
+
+    " Langkah 5: Kirim Request
+    CALL METHOD lo_client->send
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc = 1.
+      lv_msg = 'Gagal komunikasi saat kirim request (Communication failure)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc = 2.
+      lv_msg = 'State tidak valid saat kirim request'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc = 3.
+      lv_msg = 'Proses kirim request gagal (Processing failed)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc <> 0.
+      lv_msg = 'Gagal mengirim request (Unknown error)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ENDIF.
+
+    " Langkah 6: Terima Response
+    CALL METHOD lo_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc = 1.
+      lv_msg = 'Gagal komunikasi saat menerima response'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc = 2.
+      lv_msg = 'State tidak valid saat menerima response'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc = 3.
+      lv_msg = 'Proses menerima response gagal'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ELSEIF sy-subrc <> 0.
+      lv_msg = 'Gagal menerima response (Unknown error)'.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      CONTINUE.
+    ENDIF.
+
+    " Langkah 7: Dapatkan Status Response
+    CALL METHOD lo_client->response->get_status
+      IMPORTING
+        code   = lv_status_code
+        reason = lv_reason.
+
+    lv_code     = lv_status_code.
+    lv_reason_c = lv_reason.
+
+    " Langkah 8: Baca Body Response
+    lv_result = lo_client->response->get_cdata( ).
+
+    lv_total_sent = lv_end_index.
+
+    CLEAR lv_index_str.
+    WRITE lv_end_index TO lv_index_str.
+    CONDENSE lv_index_str.
+    CONCATENATE 'Batch up to record' lv_index_str 'sent successfully (Status:' lv_code ')'
+                INTO lv_msg SEPARATED BY space.
+    MESSAGE lv_msg TYPE 'S'.
+
+    " Langkah 9: Tutup Koneksi Client
+    CALL METHOD lo_client->close.
+  ENDWHILE.
+
+  " Ringkasan Informasi Total Data Terkirim ke Web
+  CLEAR lv_tot_str.
+  WRITE lv_total_sent TO lv_tot_str.
+  CONDENSE lv_tot_str.
+  CONCATENATE 'Total data sent to Web:' lv_tot_str 'records.' INTO lv_tot_msg SEPARATED BY space.
+  MESSAGE lv_tot_msg TYPE 'S'.
+
+  " ============================================================
+  " Ringkasan Total Waktu Eksekusi
+  " ============================================================
+  GET RUN TIME FIELD lv_end_time.
+  lv_duration = lv_end_time - lv_start_time.   " mikrodetik
+  lv_sec      = lv_duration / 1000000.
+
+  " Konversi total detik ke format T (HHMMSS) -> otomatis leading zero
+  CLEAR lv_time_t.
+  lv_time_t = lv_sec.
+
+  CLEAR lv_time_str.
+  WRITE lv_time_t TO lv_time_str.   " hasil: '00:04:59'
+
+  " Total detik tanpa leading zero
+  CLEAR lv_tot_sec_c.
+  lv_tot_sec_c = lv_sec.
+  CONDENSE lv_tot_sec_c.
+
+  " Susun pesan akhir
+  CLEAR lv_time_msg.
+  CONCATENATE 'Total execution time send to web:'
+              lv_time_str
+              '(' lv_tot_sec_c 'seconds )'
+         INTO lv_time_msg SEPARATED BY space.
+  CONDENSE lv_time_msg.
+
+  MESSAGE lv_time_msg TYPE 'S'.
+
+ENDFORM.                    "send_to_web

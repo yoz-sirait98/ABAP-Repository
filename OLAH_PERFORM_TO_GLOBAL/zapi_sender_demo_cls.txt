@@ -1,0 +1,127 @@
+*&---------------------------------------------------------------------*
+*&  Include  ZAPI_SENDER_DEMO_CLS
+*&---------------------------------------------------------------------*
+*&  Title           : Local class LCL_APP
+*&  Author          : Yosua Sirait
+*&  Date            : 20261002
+*&  Description     : DEFINITION + global DATA object + IMPLEMENTATION
+*&---------------------------------------------------------------------*
+
+*---------------------------------------------------------------------*
+* Class Definition
+*---------------------------------------------------------------------*
+CLASS lcl_app DEFINITION.
+
+  PUBLIC SECTION.
+
+    METHODS:
+      run.
+
+  PRIVATE SECTION.
+
+    METHODS:
+      get_data,
+      send_data
+        EXPORTING
+          ev_rc      TYPE i
+          ev_message TYPE string.
+
+    DATA:
+      gt_payload TYPE ty_t_payload,
+      go_api     TYPE REF TO zcl_api_sender.
+
+ENDCLASS.                    "lcl_app DEFINITION
+
+*---------------------------------------------------------------------*
+* Global DATA (setelah ENDCLASS: TYPE REF hanya ke class global,
+* tetap konsisten dengan konvensi include TOP/CLS/SCR)
+*---------------------------------------------------------------------*
+DATA: go_app TYPE REF TO lcl_app.
+
+*---------------------------------------------------------------------*
+* Class Implementation
+*---------------------------------------------------------------------*
+CLASS lcl_app IMPLEMENTATION.
+
+*-------------------------------------------------------------------*
+  METHOD run.
+
+    DATA: lv_rc  TYPE i,
+          lv_msg TYPE string.
+
+    CALL METHOD get_data.
+
+    CALL METHOD send_data
+      IMPORTING
+        ev_rc      = lv_rc
+        ev_message = lv_msg.
+
+    WRITE: / lv_msg.
+
+  ENDMETHOD.                "run
+
+*-------------------------------------------------------------------*
+* Method get_data
+*-------------------------------------------------------------------*
+  METHOD get_data.
+
+    DATA: ls_payload TYPE ty_payload,
+          ls_abtm    TYPE ztrx_abtm.
+
+    DATA: lt_abtm TYPE STANDARD TABLE OF ztrx_abtm.
+
+    REFRESH gt_payload.
+
+    SELECT * FROM ztrx_abtm
+      INTO TABLE lt_abtm
+      WHERE cidunit  = p_unit
+        AND ddateabs IN s_date
+        AND cidnik   IN s_nik.
+
+    LOOP AT lt_abtm INTO ls_abtm.
+      CLEAR ls_payload.
+      MOVE-CORRESPONDING ls_abtm TO ls_payload.
+      APPEND ls_payload TO gt_payload.
+    ENDLOOP.
+
+  ENDMETHOD.                "get_data
+
+*-------------------------------------------------------------------*
+* Method send_data
+*-------------------------------------------------------------------*
+  METHOD send_data.
+
+    DATA: lv_url TYPE string.
+
+    IF gt_payload IS INITIAL.
+      MESSAGE 'Tidak ada data untuk dikirim' TYPE 'S'
+              DISPLAY LIKE 'E'.
+      RETURN.
+    ENDIF.
+
+*   Routing environment tetap urusan program (pola lama)
+    IF sy-sysid = 'MPD'.
+      lv_url = 'http://10.90.10.60/restapi/middlewaresap/abtmdata'.
+    ELSE.
+      lv_url = 'http://10.90.10.32/restapi/middlewaresap/abtmdata'.
+    ENDIF.
+
+*   Semua yang dulu ~130 baris HTTP per program = satu call:
+    CREATE OBJECT go_api
+      EXPORTING
+        iv_write_log = 'X'
+        iv_caller    = sy-repid.
+
+    CALL METHOD go_api->send_table_generic
+      EXPORTING
+        iv_url        = lv_url
+        iv_batch_size = 100
+        iv_json_field = 'NABSHK'
+        it_data       = gt_payload
+      IMPORTING
+        ev_rc         = ev_rc
+        ev_message    = ev_message.
+
+  ENDMETHOD.                "send_data
+
+ENDCLASS.                    "lcl_app IMPLEMENTATION

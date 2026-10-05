@@ -1,0 +1,895 @@
+*&---------------------------------------------------------------------*
+*& Report  ZMM_STOCK
+*& Title   : Data Stock SAP (Fertilizer + BASO PM)
+*& Author  : Yosua Sirait
+*& Date    : 13/08/2026
+*& Revised : 01/10/2026 - fix batch/valuation mix-up, lgort filter on
+*&                      MCHB path, MATNR substring guard, HTTP status
+*&                      handling, sent-record totals, CHARG field added
+*& Request by  : Agung Kharisma
+*&---------------------------------------------------------------------*
+*&                                                                     *
+*&---------------------------------------------------------------------*
+REPORT zmm_stock.
+
+TYPE-POOLS: slis.
+
+TABLES: mard, mara, mbew, mchb, t001w.
+
+*----------------------------------------------------------------------*
+* Definisi Tipe Data
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_output,
+         werks TYPE mard-werks,
+         lgort TYPE mard-lgort,
+         matnr TYPE mara-matnr,
+         maktg TYPE makt-maktg,
+         charg TYPE mchb-charg,
+         bwtar TYPE mbew-bwtar,
+         mtart TYPE mara-mtart,
+         matkl TYPE mara-matkl,
+         labst TYPE mard-labst,
+         meins TYPE mara-meins,
+         verpr TYPE mbew-verpr,
+       END OF ty_output.
+
+TYPES: BEGIN OF ty_data_conv,
+         mandt TYPE symandt,
+         werks TYPE mard-werks,
+         lgort TYPE mard-lgort,
+         matnr TYPE mara-matnr,
+         maktg TYPE makt-maktg,
+         charg TYPE mchb-charg,
+         bwtar TYPE mbew-bwtar,
+         mtart TYPE mara-mtart,
+         matkl TYPE mara-matkl,
+         labst TYPE string,
+         meins TYPE mara-meins,
+         verpr TYPE string,
+       END OF ty_data_conv.
+
+TYPES: BEGIN OF ty_mard_mara,
+         werks TYPE mard-werks,
+         lgort TYPE mard-lgort,
+         matnr TYPE mard-matnr,
+         labst TYPE mard-labst,
+         mtart TYPE mara-mtart,
+         matkl TYPE mara-matkl,
+         meins TYPE mara-meins,
+       END OF ty_mard_mara.
+
+TYPES: BEGIN OF ty_mchb,
+         matnr TYPE mchb-matnr,
+         werks TYPE mchb-werks,
+         lgort TYPE mchb-lgort,
+         charg TYPE mchb-charg,
+         clabs TYPE mchb-clabs,
+       END OF ty_mchb.
+
+TYPES: BEGIN OF ty_matnr,
+         matnr TYPE mard-matnr,
+       END OF ty_matnr.
+
+TYPES: BEGIN OF ty_matnr_werks,
+         matnr TYPE mard-matnr,
+         werks TYPE mard-werks,
+       END OF ty_matnr_werks.
+
+TYPES: BEGIN OF ty_makt,
+         matnr TYPE makt-matnr,
+         spras TYPE makt-spras,
+         maktg TYPE makt-maktg,
+       END OF ty_makt.
+
+TYPES: BEGIN OF ty_mbew,
+         matnr TYPE mbew-matnr,
+         bwkey TYPE mbew-bwkey,
+         bwtar TYPE mbew-bwtar,
+         vprsv TYPE mbew-vprsv,
+         verpr TYPE mbew-verpr,
+         stprs TYPE mbew-stprs,
+         salk3 TYPE mbew-salk3,
+         lbkum TYPE mbew-lbkum,
+       END OF ty_mbew.
+
+*----------------------------------------------------------------------*
+* Deklarasi Data Global
+*----------------------------------------------------------------------*
+DATA: gt_output   TYPE STANDARD TABLE OF ty_output,
+      gs_output   TYPE ty_output,
+      gt_fieldcat TYPE slis_t_fieldcat_alv,
+      gs_fieldcat TYPE slis_fieldcat_alv,
+      gs_layout   TYPE slis_layout_alv.
+
+*----------------------------------------------------------------------*
+* Layar Seleksi
+*----------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE text-001.
+  SELECT-OPTIONS: s_matnr FOR mara-matnr,
+                  s_werks FOR mard-werks,
+                  s_lgort FOR mard-lgort,
+                  s_mtart FOR mara-mtart,
+                  s_matkl FOR mara-matkl,
+                  s_bwtar FOR mbew-bwtar.
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE text-002.
+  PARAMETERS: r_alv RADIOBUTTON GROUP g1 DEFAULT 'X',
+              r_web RADIOBUTTON GROUP g1.
+SELECTION-SCREEN END OF BLOCK b2.
+
+*----------------------------------------------------------------------*
+* Awal Eksekusi Seleksi
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+  PERFORM get_data.
+  IF r_alv = 'X'.
+    PERFORM display_alv.
+  ELSEIF r_web = 'X'.
+    PERFORM send_to_web.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*& Form GET_DATA
+*&---------------------------------------------------------------------*
+*& Mengambil saldo stok dari MARD, MCHB, MARA, MAKT, MBEW, dan T001W
+*& Menerapkan aturan bisnis:
+*& 1. Mengecualikan awalan MATNR (3, 9)
+*& 2. Filter MARD-WERKS berdasarkan T001W-PFACH <> 'X'
+*& 3. Logika Prioritas Stok Batch vs Non-Batch (per MATNR + WERKS):
+*&    - Jika MATNR + WERKS ada di MCHB -> Ambil HANYA data MCHB dan abaikan MARD
+*&    - Jika MATNR + WERKS TIDAK ada di MCHB -> Ambil data dari MARD
+*& 4. Menghitung Harga Satuan Efektif
+*&---------------------------------------------------------------------*
+FORM get_data.
+  DATA: lt_mard_mara       TYPE STANDARD TABLE OF ty_mard_mara,
+        ls_mard_mara       TYPE ty_mard_mara,
+        lt_mchb            TYPE STANDARD TABLE OF ty_mchb,
+        ls_mchb            TYPE ty_mchb,
+        lt_matnr           TYPE STANDARD TABLE OF ty_matnr,
+        ls_matnr           TYPE ty_matnr,
+        lt_matnr_key       TYPE STANDARD TABLE OF ty_matnr_werks,
+        ls_matnr_key       TYPE ty_matnr_werks,
+        lt_mchb_keys       TYPE STANDARD TABLE OF ty_matnr_werks,
+        ls_mchb_key        TYPE ty_matnr_werks,
+        lt_makt            TYPE STANDARD TABLE OF ty_makt,
+        ls_makt            TYPE ty_makt,
+        lt_makt_all        TYPE STANDARD TABLE OF ty_makt,
+        ls_makt_all        TYPE ty_makt,
+        lt_mbew            TYPE STANDARD TABLE OF ty_mbew,
+        ls_mbew            TYPE ty_mbew,
+        lt_output_filtered TYPE STANDARD TABLE OF ty_output.
+
+  DATA: lv_matnr_clean TYPE mard-matnr,
+        lv_first_char  TYPE c,
+        lv_len_matnr   TYPE i,
+        lv_unit_price  TYPE mbew-verpr.
+
+  CLEAR: gt_output, lt_mard_mara, lt_mchb, lt_matnr, lt_matnr_key, lt_mchb_keys, lt_makt, lt_mbew.
+
+  " 1. Ambil data dasar stok MARD, MARA, dan T001W (Filter T001W-PFACH <> 'X' dan flag penghapusan)
+  SELECT a~werks
+         a~lgort
+         a~matnr
+         a~labst
+         b~mtart
+         b~matkl
+         b~meins
+    INTO TABLE lt_mard_mara
+    FROM mard AS a
+    INNER JOIN mara AS b ON b~matnr = a~matnr
+    INNER JOIN t001w AS c ON c~werks = a~werks
+    WHERE a~matnr IN s_matnr
+      AND a~werks IN s_werks
+      AND a~lgort IN s_lgort
+      AND b~mtart IN s_mtart
+      AND b~matkl IN s_matkl
+      AND a~lvorm = space
+      AND b~lvorm = space
+      AND c~pfach <> 'X'.
+
+  IF lt_mard_mara IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " 2. Filter material yang diawali dengan angka '3' atau '9' dan siapkan kunci MATNR + WERKS
+  LOOP AT lt_mard_mara INTO ls_mard_mara.
+    lv_matnr_clean = ls_mard_mara-matnr.
+    SHIFT lv_matnr_clean LEFT DELETING LEADING '0'.
+    lv_len_matnr = STRLEN( lv_matnr_clean ).
+
+    IF lv_len_matnr = 0.
+      CONTINUE.
+    ENDIF.
+
+    lv_first_char = lv_matnr_clean(1).
+
+    IF lv_first_char = '3' OR lv_first_char = '9'.
+      CONTINUE.
+    ENDIF.
+
+    ls_matnr-matnr = ls_mard_mara-matnr.
+    APPEND ls_matnr TO lt_matnr.
+
+    ls_matnr_key-matnr = ls_mard_mara-matnr.
+    ls_matnr_key-werks = ls_mard_mara-werks.
+    APPEND ls_matnr_key TO lt_matnr_key.
+  ENDLOOP.
+
+  IF lt_matnr_key IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " 3. Siapkan tabel driver untuk select FOR ALL ENTRIES
+  SORT lt_matnr BY matnr.
+  DELETE ADJACENT DUPLICATES FROM lt_matnr COMPARING matnr.
+
+  SORT lt_matnr_key BY matnr werks.
+  DELETE ADJACENT DUPLICATES FROM lt_matnr_key COMPARING matnr werks.
+
+  " 4. Ambil detail stok batch dari MCHB untuk kunci MATNR + WERKS
+  IF NOT lt_matnr_key IS INITIAL.
+    SELECT matnr werks lgort charg clabs
+      INTO TABLE lt_mchb
+      FROM mchb
+      FOR ALL ENTRIES IN lt_matnr_key
+      WHERE matnr = lt_matnr_key-matnr
+        AND werks = lt_matnr_key-werks
+        AND lgort IN s_lgort.
+  ENDIF.
+
+  " Buat daftar kunci (MATNR, WERKS) yang terdapat di MCHB
+  CLEAR lt_mchb_keys.
+  LOOP AT lt_mchb INTO ls_mchb.
+    ls_mchb_key-matnr = ls_mchb-matnr.
+    ls_mchb_key-werks = ls_mchb-werks.
+    APPEND ls_mchb_key TO lt_mchb_keys.
+  ENDLOOP.
+  SORT lt_mchb_keys BY matnr werks.
+  DELETE ADJACENT DUPLICATES FROM lt_mchb_keys COMPARING matnr werks.
+
+  SORT lt_mchb BY matnr werks lgort charg.
+
+  " 5. Bentuk data stok dasar berdasarkan logika MCHB vs MARD:
+  "    a. Jika kombinasi MATNR + WERKS ada di MCHB -> Ambil data DARI MCHB SAJA dan abaikan MARD.
+  "    b. Jika kombinasi MATNR + WERKS tidak ada di MCHB -> Ambil data dari MARD.
+  CLEAR gt_output.
+
+  " A. Proses data dari MCHB untuk pasangan MATNR + WERKS yang ada di MCHB
+  IF NOT lt_mchb IS INITIAL.
+    LOOP AT lt_mchb INTO ls_mchb.
+      " Hanya storage location yang lolos filter seleksi
+      IF NOT ls_mchb-lgort IN s_lgort.
+        CONTINUE.
+      ENDIF.
+
+      " Hanya pasangan MATNR + WERKS yang lolos filter MARA/T001W
+      READ TABLE lt_mard_mara INTO ls_mard_mara
+                 WITH KEY matnr = ls_mchb-matnr
+                          werks = ls_mchb-werks.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      CLEAR gs_output.
+      gs_output-werks = ls_mchb-werks.
+      gs_output-lgort = ls_mchb-lgort.
+      gs_output-matnr = ls_mchb-matnr.
+      gs_output-charg = ls_mchb-charg.
+      gs_output-labst = ls_mchb-clabs.
+      gs_output-mtart = ls_mard_mara-mtart.
+      gs_output-matkl = ls_mard_mara-matkl.
+      gs_output-meins = ls_mard_mara-meins.
+
+      APPEND gs_output TO gt_output.
+    ENDLOOP.
+  ENDIF.
+
+  " B. Proses data dari MARD HANYA untuk MATNR + WERKS yang TIDAK ADA di MCHB
+  LOOP AT lt_mard_mara INTO ls_mard_mara.
+    " Cek filter awalan '3' atau '9'
+    lv_matnr_clean = ls_mard_mara-matnr.
+    SHIFT lv_matnr_clean LEFT DELETING LEADING '0'.
+    lv_len_matnr = STRLEN( lv_matnr_clean ).
+
+    IF lv_len_matnr = 0.
+      CONTINUE.
+    ENDIF.
+
+    lv_first_char = lv_matnr_clean(1).
+    IF lv_first_char = '3' OR lv_first_char = '9'.
+      CONTINUE.
+    ENDIF.
+
+    " Jika MATNR + WERKS ada di MCHB, abaikan MARD (karena sudah diambil dari MCHB)
+    READ TABLE lt_mchb_keys TRANSPORTING NO FIELDS
+               WITH KEY matnr = ls_mard_mara-matnr
+                        werks = ls_mard_mara-werks
+               BINARY SEARCH.
+    IF sy-subrc = 0.
+      CONTINUE.
+    ENDIF.
+
+    CLEAR gs_output.
+    gs_output-werks = ls_mard_mara-werks.
+    gs_output-lgort = ls_mard_mara-lgort.
+    gs_output-matnr = ls_mard_mara-matnr.
+    gs_output-labst = ls_mard_mara-labst.
+    gs_output-mtart = ls_mard_mara-mtart.
+    gs_output-matkl = ls_mard_mara-matkl.
+    gs_output-meins = ls_mard_mara-meins.
+    APPEND gs_output TO gt_output.
+  ENDLOOP.
+
+  IF gt_output IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " 6. Ambil Deskripsi Material (MAKT) sesuai bahasa pengguna
+  IF NOT lt_matnr IS INITIAL.
+    SELECT matnr spras maktg
+      INTO TABLE lt_makt
+      FROM makt
+      FOR ALL ENTRIES IN lt_matnr
+      WHERE matnr = lt_matnr-matnr
+        AND spras = sy-langu.
+
+    " Alternatif: ambil deskripsi dalam bahasa apa pun jika tidak tersedia dalam sy-langu
+    IF lines( lt_makt ) < lines( lt_matnr ).
+      SELECT matnr spras maktg
+        INTO TABLE lt_makt_all
+        FROM makt
+        FOR ALL ENTRIES IN lt_matnr
+        WHERE matnr = lt_matnr-matnr.
+
+      SORT lt_makt BY matnr.
+      LOOP AT lt_makt_all INTO ls_makt_all.
+        READ TABLE lt_makt TRANSPORTING NO FIELDS
+                   WITH KEY matnr = ls_makt_all-matnr
+                   BINARY SEARCH.
+        IF sy-subrc <> 0.
+          APPEND ls_makt_all TO lt_makt.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+
+  SORT lt_makt BY matnr.
+
+  " 7. Ambil Harga Bergerak (MBEW) & detail penilaian material
+  IF NOT lt_matnr_key IS INITIAL.
+    IF s_bwtar IS INITIAL.
+      SELECT matnr bwkey bwtar vprsv verpr stprs salk3 lbkum
+        INTO TABLE lt_mbew
+        FROM mbew
+        FOR ALL ENTRIES IN lt_matnr_key
+        WHERE matnr = lt_matnr_key-matnr
+          AND bwkey = lt_matnr_key-werks
+          AND lvorm = space.
+    ELSE.
+      SELECT matnr bwkey bwtar vprsv verpr stprs salk3 lbkum
+        INTO TABLE lt_mbew
+        FROM mbew
+        FOR ALL ENTRIES IN lt_matnr_key
+        WHERE matnr = lt_matnr_key-matnr
+          AND bwkey = lt_matnr_key-werks
+          AND bwtar IN s_bwtar
+          AND lvorm = space.
+    ENDIF.
+  ENDIF.
+
+  SORT lt_mbew BY matnr bwkey bwtar.
+
+  " 8. Isi Deskripsi (MAKTG), Harga Satuan (VERPR), dan Tipe Penilaian (BWTAR)
+  CLEAR lt_output_filtered.
+  LOOP AT gt_output INTO gs_output.
+    " Deskripsi Material
+    READ TABLE lt_makt INTO ls_makt
+               WITH KEY matnr = gs_output-matnr
+               BINARY SEARCH.
+    IF sy-subrc = 0.
+      gs_output-maktg = ls_makt-maktg.
+    ENDIF.
+
+    " Harga Bergerak, Harga Standar
+    " CATATAN: bwtar output untuk material batch berisi CHARG (bukan
+    " valuation type), jadi MBEW dicari dengan kunci MATNR + BWKEY saja
+    " (prioritas rekaman bwtar = space).
+    CLEAR ls_mbew.
+    READ TABLE lt_mbew INTO ls_mbew
+               WITH KEY matnr = gs_output-matnr
+                        bwkey = gs_output-werks
+                        bwtar = space
+               BINARY SEARCH.
+
+    IF sy-subrc <> 0.
+      " Alternatif: rekaman penilaian pertama untuk MATNR + BWKEY
+      LOOP AT lt_mbew INTO ls_mbew
+           WHERE matnr = gs_output-matnr
+             AND bwkey = gs_output-werks.
+        EXIT.
+      ENDLOOP.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      IF gs_output-bwtar IS INITIAL.
+        gs_output-bwtar = ls_mbew-bwtar.
+      ENDIF.
+
+      " Hitung Harga Satuan Efektif
+      IF ls_mbew-vprsv = 'V'.
+        IF ls_mbew-lbkum <> 0 AND ls_mbew-salk3 <> 0.
+          lv_unit_price = ls_mbew-salk3 / ls_mbew-lbkum.
+        ELSE.
+          lv_unit_price = ls_mbew-verpr.
+        ENDIF.
+      ELSE.
+        lv_unit_price = ls_mbew-stprs.
+      ENDIF.
+
+      gs_output-verpr = lv_unit_price.
+    ENDIF.
+
+    " Filter berdasarkan S_BWTAR jika diisi pengguna
+    " (hanya material non-batch: baris batch menyimpan CHARG di bwtar-charg)
+    IF NOT s_bwtar IS INITIAL.
+      IF gs_output-charg IS NOT INITIAL.
+        " material batch: bukan objek filter valuation type
+        APPEND gs_output TO lt_output_filtered.
+      ELSEIF gs_output-bwtar IN s_bwtar.
+        APPEND gs_output TO lt_output_filtered.
+      ENDIF.
+    ELSE.
+      APPEND gs_output TO lt_output_filtered.
+    ENDIF.
+  ENDLOOP.
+
+  gt_output = lt_output_filtered.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& Form BUILD_FIELDCAT
+*&---------------------------------------------------------------------*
+*& Menyusun katalog field ALV dengan referensi field DDIC yang sesuai
+*&---------------------------------------------------------------------*
+FORM build_fieldcat.
+  DATA: ls_fc TYPE slis_fieldcat_alv.
+
+  CLEAR gt_fieldcat.
+
+  " 1. Pabrik / Plant (WERKS)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 1.
+  ls_fc-fieldname     = 'WERKS'.
+  ls_fc-ref_fieldname = 'WERKS'.
+  ls_fc-ref_tabname   = 'MARD'.
+  ls_fc-seltext_m     = 'Plant'.
+  ls_fc-key           = 'X'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 2. Lokasi Penyimpanan / Storage Location (LGORT)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 2.
+  ls_fc-fieldname     = 'LGORT'.
+  ls_fc-ref_fieldname = 'LGORT'.
+  ls_fc-ref_tabname   = 'MARD'.
+  ls_fc-seltext_m     = 'Stor. Location'.
+  ls_fc-key           = 'X'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 3. Nomor Material (MATNR)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 3.
+  ls_fc-fieldname     = 'MATNR'.
+  ls_fc-ref_fieldname = 'MATNR'.
+  ls_fc-ref_tabname   = 'MARA'.
+  ls_fc-seltext_m     = 'Material'.
+  ls_fc-key           = 'X'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 4. Deskripsi Material (MAKTG)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 4.
+  ls_fc-fieldname     = 'MAKTG'.
+  ls_fc-ref_fieldname = 'MAKTG'.
+  ls_fc-ref_tabname   = 'MAKT'.
+  ls_fc-seltext_m     = 'Description'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 5. Batch Number (CHARG)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 5.
+  ls_fc-fieldname     = 'CHARG'.
+  ls_fc-ref_fieldname = 'CHARG'.
+  ls_fc-ref_tabname   = 'MCHB'.
+  ls_fc-seltext_m     = 'Batch'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 6. Tipe Penilaian (BWTAR)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 6.
+  ls_fc-fieldname     = 'BWTAR'.
+  ls_fc-ref_fieldname = 'BWTAR'.
+  ls_fc-ref_tabname   = 'MBEW'.
+  ls_fc-seltext_m     = 'Valuation Type'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 7. Tipe Material (MTART)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 7.
+  ls_fc-fieldname     = 'MTART'.
+  ls_fc-ref_fieldname = 'MTART'.
+  ls_fc-ref_tabname   = 'MARA'.
+  ls_fc-seltext_m     = 'Material Type'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 8. Kelompok Material (MATKL)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 8.
+  ls_fc-fieldname     = 'MATKL'.
+  ls_fc-ref_fieldname = 'MATKL'.
+  ls_fc-ref_tabname   = 'MARA'.
+  ls_fc-seltext_m     = 'Material Group'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 9. Jumlah Saldo Stok (LABST)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 9.
+  ls_fc-fieldname     = 'LABST'.
+  ls_fc-ref_fieldname = 'LABST'.
+  ls_fc-ref_tabname   = 'MARD'.
+  ls_fc-qfieldname    = 'MEINS'.
+  ls_fc-seltext_m     = 'Stock Balance'.
+  ls_fc-do_sum        = 'X'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 10. Satuan Ukur Dasar (MEINS)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 10.
+  ls_fc-fieldname     = 'MEINS'.
+  ls_fc-ref_fieldname = 'MEINS'.
+  ls_fc-ref_tabname   = 'MARA'.
+  ls_fc-seltext_m     = 'UoM'.
+  APPEND ls_fc TO gt_fieldcat.
+
+  " 11. Harga Satuan (VERPR)
+  CLEAR ls_fc.
+  ls_fc-col_pos       = 11.
+  ls_fc-fieldname     = 'VERPR'.
+  ls_fc-ref_fieldname = 'VERPR'.
+  ls_fc-ref_tabname   = 'MBEW'.
+  ls_fc-seltext_m     = 'Unit Price'.
+  APPEND ls_fc TO gt_fieldcat.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& Form DISPLAY_ALV
+*&---------------------------------------------------------------------*
+*& Menampilkan output ALV Grid menggunakan REUSE_ALV_GRID_DISPLAY klasik
+*&---------------------------------------------------------------------*
+FORM display_alv.
+  DATA: lv_lines_cnt TYPE i,
+        lv_cnt_str   TYPE c LENGTH 10,
+        lv_msg_cnt   TYPE string.
+
+  IF gt_output IS INITIAL.
+    MESSAGE 'No stock data found for the selected criteria.' TYPE 'S' DISPLAY LIKE 'E'.
+    EXIT.
+  ENDIF.
+
+  lv_lines_cnt = lines( gt_output ).
+  WRITE lv_lines_cnt TO lv_cnt_str.
+  CONDENSE lv_cnt_str.
+  CONCATENATE 'Total data displayed:' lv_cnt_str 'records' INTO lv_msg_cnt SEPARATED BY space.
+  MESSAGE lv_msg_cnt TYPE 'S'.
+
+  PERFORM build_fieldcat.
+
+  CLEAR gs_layout.
+  gs_layout-colwidth_optimize = 'X'.
+  gs_layout-zebra             = 'X'.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program = sy-repid
+      is_layout          = gs_layout
+      it_fieldcat        = gt_fieldcat
+      i_save             = 'A'
+    TABLES
+      t_outtab           = gt_output
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& Form SEND_TO_WEB
+*&---------------------------------------------------------------------*
+*& Mengonversi data output ke JSON dan mengirim ke Middleware REST API
+*& Pengiriman data bertahap (batch) 200 rekaman per request HTTP
+*& URL Tujuan: http://10.90.10.67/restapi/middlewaresap/stokfzdata
+*&---------------------------------------------------------------------*
+FORM send_to_web.
+  DATA: lt_data_conv TYPE STANDARD TABLE OF ty_data_conv,
+        ls_data_conv TYPE ty_data_conv,
+        lt_data_200  TYPE STANDARD TABLE OF ty_data_conv.
+
+  DATA: lo_json   TYPE REF TO zcl_json_serializer,
+        lo_client TYPE REF TO if_http_client,
+        lv_json   TYPE string,
+        lv_url    TYPE string,
+        lv_result TYPE string.
+
+  DATA: lv_lines      TYPE i,
+        lv_index      TYPE i,
+        lv_end_index  TYPE i,
+        lv_batch_cnt  TYPE i,
+        lv_index_str  TYPE c LENGTH 6,
+        lv_msg        TYPE string,
+        lv_total_sent TYPE i,
+        lv_fail_batch TYPE i,
+        lv_tot_str    TYPE c LENGTH 10,
+        lv_tot_msg    TYPE string.
+
+  DATA: lv_status_code TYPE i,
+        lv_reason      TYPE string,
+        lv_code        TYPE c LENGTH 3,
+        lv_reason_c    TYPE c LENGTH 100.
+
+  IF gt_output IS INITIAL.
+    IF sy-batch = 'X'.
+      WRITE: / 'No stock data found to send.'.
+    ELSE.
+      MESSAGE 'No stock data found to send.' TYPE 'S' DISPLAY LIKE 'E'.
+    ENDIF.
+    EXIT.
+  ENDIF.
+
+  " Konversi tabel output ke struktur JSON (merapikan spasi pada jumlah dan harga)
+  CLEAR lt_data_conv.
+  LOOP AT gt_output INTO gs_output.
+    CLEAR ls_data_conv.
+    ls_data_conv-mandt = sy-mandt.
+    ls_data_conv-werks = gs_output-werks.
+    ls_data_conv-lgort = gs_output-lgort.
+    ls_data_conv-matnr = gs_output-matnr.
+    ls_data_conv-maktg = gs_output-maktg.
+    ls_data_conv-charg = gs_output-charg.
+    ls_data_conv-bwtar = gs_output-bwtar.
+    ls_data_conv-mtart = gs_output-mtart.
+    ls_data_conv-matkl = gs_output-matkl.
+
+    ls_data_conv-labst = gs_output-labst.
+    CONDENSE ls_data_conv-labst.
+
+    ls_data_conv-meins = gs_output-meins.
+
+    ls_data_conv-verpr = gs_output-verpr.
+    CONDENSE ls_data_conv-verpr.
+
+    APPEND ls_data_conv TO lt_data_conv.
+  ENDLOOP.
+
+  lv_lines      = lines( lt_data_conv ).
+  lv_index      = 1.
+  lv_total_sent = 0.
+  lv_fail_batch = 0.
+
+  IF sy-sysid = 'MPD'.
+    lv_url        = 'http://10.90.10.60/restapi/middlewaresap/stokfzdata'.
+  ELSE.
+    lv_url        = 'http://10.90.10.67/restapi/middlewaresap/sapstockdata'.
+  ENDIF.
+
+  WHILE lv_index <= lv_lines.
+    CLEAR: lv_msg, lv_json.
+    REFRESH: lt_data_200.
+
+    lv_batch_cnt = lv_index.
+
+    lv_end_index = lv_index + 199.
+    IF lv_end_index > lv_lines.
+      lv_end_index = lv_lines.
+    ENDIF.
+
+    LOOP AT lt_data_conv INTO ls_data_conv
+         FROM lv_index TO lv_end_index.
+      APPEND ls_data_conv TO lt_data_200.
+    ENDLOOP.
+
+    lv_index = lv_end_index + 1.
+
+    " Langkah 1: Serialisasi data ke JSON
+    CREATE OBJECT lo_json.
+    lv_json = lo_json->serialize( lt_data_200 ).
+
+    " Langkah 2: Buat HTTP Client
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = lv_url
+      IMPORTING
+        client             = lo_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+
+    IF sy-subrc = 1.
+      lv_msg = 'URL tidak valid (Argument not found)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc = 2.
+      lv_msg = 'ICM/HTTP plugin tidak aktif (Plugin not active)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc = 3.
+      lv_msg = 'Error internal saat membuat HTTP client'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc <> 0.
+      lv_msg = 'Gagal membuat HTTP client (Unknown error)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ENDIF.
+
+    " Langkah 3: Atur Field Header
+    CALL METHOD lo_client->request->set_header_field
+      EXPORTING
+        name  = 'Content-Type'
+        value = 'application/json; charset=utf-8'.
+
+    " Langkah 4: Atur Body HTTP
+    CALL METHOD lo_client->request->set_cdata
+      EXPORTING
+        data = lv_json.
+
+    " Langkah 5: Kirim Request
+    CALL METHOD lo_client->send
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc = 1.
+      lv_msg = 'Gagal komunikasi saat kirim request (Communication failure)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc = 2.
+      lv_msg = 'State tidak valid saat kirim request'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc = 3.
+      lv_msg = 'Proses kirim request gagal (Processing failed)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc <> 0.
+      lv_msg = 'Gagal mengirim request (Unknown error)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ENDIF.
+
+    " Langkah 6: Terima Response
+    CALL METHOD lo_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc = 1.
+      lv_msg = 'Gagal komunikasi saat menerima response'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc = 2.
+      lv_msg = 'State tidak valid saat menerima response'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc = 3.
+      lv_msg = 'Proses menerima response gagal'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ELSEIF sy-subrc <> 0.
+      lv_msg = 'Gagal menerima response (Unknown error)'.
+      IF sy-batch = 'X'. WRITE: / lv_msg. ELSE. MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'. ENDIF.
+      CALL METHOD lo_client->close.
+      lv_fail_batch = lv_fail_batch + 1.
+      CONTINUE.
+    ENDIF.
+
+    " Langkah 7: Dapatkan Status Response
+    CALL METHOD lo_client->response->get_status
+      IMPORTING
+        code   = lv_status_code
+        reason = lv_reason.
+
+    lv_code     = lv_status_code.
+    lv_reason_c = lv_reason.
+
+    " Langkah 8: Baca Body Response
+    lv_result = lo_client->response->get_cdata( ).
+
+    " Langkah 8b: Cek Status HTTP sebelum mengklaim sukses
+    lv_batch_cnt = lv_end_index - lv_batch_cnt + 1.
+
+    IF lv_status_code >= 200 AND lv_status_code < 300.
+      lv_total_sent = lv_total_sent + lv_batch_cnt.
+
+      CLEAR lv_index_str.
+      WRITE lv_end_index TO lv_index_str.
+      CONDENSE lv_index_str.
+      CONCATENATE 'Batch up to record' lv_index_str
+                  'sent successfully' lv_batch_cnt 'records (Status:' lv_code ')'
+                  INTO lv_msg SEPARATED BY space.
+    ELSE.
+      lv_fail_batch = lv_fail_batch + 1.
+
+      CLEAR lv_index_str.
+      WRITE lv_end_index TO lv_index_str.
+      CONDENSE lv_index_str.
+      CONCATENATE 'Batch up to record' lv_index_str
+                  'FAILED (Status:' lv_code lv_reason ')'
+                  INTO lv_msg SEPARATED BY space.
+    ENDIF.
+
+    IF sy-batch = 'X'.
+      WRITE: / lv_msg.
+      IF lv_status_code >= 300.
+        WRITE: / 'Response body:'.
+        WRITE: / lv_result.
+      ENDIF.
+    ELSE.
+      IF lv_status_code >= 300.
+        MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      ELSE.
+        MESSAGE lv_msg TYPE 'S'.
+      ENDIF.
+    ENDIF.
+
+    " Langkah 9: Tutup Koneksi Client
+    CALL METHOD lo_client->close.
+  ENDWHILE.
+
+  " Ringkasan Informasi Total Data Terkirim ke Web
+  WRITE lv_total_sent TO lv_tot_str.
+  CONDENSE lv_tot_str.
+  CONCATENATE 'Total data sent to Web:' lv_tot_str 'records.' INTO lv_tot_msg SEPARATED BY space.
+
+  IF sy-batch = 'X'.
+    WRITE: / '----------------------------------------',
+           / lv_tot_msg.
+    IF lv_fail_batch > 0.
+      CLEAR lv_tot_str.
+      WRITE lv_fail_batch TO lv_tot_str.
+      CONDENSE lv_tot_str.
+      CONCATENATE 'Failed batches:' lv_tot_str INTO lv_msg SEPARATED BY space.
+      WRITE: / lv_msg.
+    ENDIF.
+    WRITE: / '----------------------------------------'.
+  ELSE.
+    MESSAGE lv_tot_msg TYPE 'I'.
+  ENDIF.
+ENDFORM.

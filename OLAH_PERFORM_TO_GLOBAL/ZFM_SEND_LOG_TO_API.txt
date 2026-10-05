@@ -1,0 +1,159 @@
+function zfm_send_log_to_api.
+*"----------------------------------------------------------------------
+*"*"Local Interface:
+*"  IMPORTING
+*"     VALUE(IM_LOG) TYPE  ZTT_BAPI_LOG
+*"----------------------------------------------------------------------
+  data: it_log      type table of zst_bapi_log,
+        ls_log      type zst_bapi_log,
+        lt_tfckrol  type table of ztmp_log_tfckrol,
+        ls_tfckrol  type ztmp_log_tfckrol,
+        lv_json     type string,
+        lo_json     type ref to zcl_json_serializer,
+        lo_client   type ref to if_http_client,
+        lv_url      type string,
+        lv_result   type string.
+
+  data : lv_counter   type i,
+         lv_index     type i,
+         lv_index_str type c length 6,
+         lv_end_index type i,
+         lv_lines     type i,
+         lv_msg       type string.
+
+  it_log[] = im_log[].
+  loop at it_log into ls_log.
+    move-corresponding ls_log to ls_tfckrol.
+    ls_tfckrol-mandt = sy-mandt.
+    append ls_tfckrol to lt_tfckrol.
+    clear ls_tfckrol.
+  endloop.
+
+  modify ztmp_log_tfckrol from table lt_tfckrol.
+
+* Step 2: Serialize data ke JSON
+  create object lo_json.
+  lv_json = lo_json->serialize( it_log ).
+
+* Step 3: Tentukan URL tujuan
+  if sy-sysid = 'MPD'.
+    lv_url = 'http://10.90.10.60/restapi/middlewaresap/loggharvest'.
+  else.
+    lv_url = 'http://10.90.10.32/restapi/middlewaresap/loggharvest'.
+  endif.
+
+* Step 4: Buat HTTP client
+  call method cl_http_client=>create_by_url
+    exporting
+      url            = lv_url
+    importing
+      client         = lo_client
+    exceptions
+      argument_not_found = 1
+      plugin_not_active  = 2
+      internal_error     = 3
+      others             = 4.
+
+  if sy-subrc = 1.
+    message 'URL tidak valid (Argument not found)' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc = 2.
+    message 'ICM/HTTP plugin tidak aktif (Plugin not active)' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc = 3.
+    message 'Error internal saat membuat HTTP client' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc <> 0.
+    message 'Gagal membuat HTTP client (Unknown error)' type 'S' display like 'E'.
+    return.
+  endif.
+
+* Step 5: Set HTTP method to POST
+* BUG 5 FIX: HTTP POST method was never set. Without this, the request
+*             defaults to GET and the JSON body is not transmitted.
+  lo_client->request->set_method( if_http_request=>co_request_method_post ).
+
+* Step 6 (was 5): Set HTTP header
+  call method lo_client->request->set_header_field
+    exporting
+      name  = 'Content-Type'
+      value = 'application/json; charset=utf-8'.
+
+* Step 7 (was 6): Kirim JSON sebagai body POST
+  call method lo_client->request->set_cdata
+    exporting
+      data = lv_json.
+
+* Step 8 (was 7): Kirim request
+  call method lo_client->send
+    exceptions
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3
+      others                     = 4.
+
+  if sy-subrc = 1.
+    message 'Gagal komunikasi saat kirim request (Communication failure)' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc = 2.
+    message 'State tidak valid saat kirim request' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc = 3.
+    message 'Proses kirim request gagal (Processing failed)' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc <> 0.
+    message 'Gagal mengirim request (Unknown error)' type 'S' display like 'E'.
+    return.
+  endif.
+
+* Step 9 (was 8): Terima respon
+  call method lo_client->receive
+    exceptions
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3
+      others                     = 4.
+
+  if sy-subrc = 1.
+    message 'Gagal komunikasi saat menerima response' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc = 2.
+    message 'State tidak valid saat menerima response' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc = 3.
+    message 'Proses menerima response gagal' type 'S' display like 'E'.
+    return.
+  elseif sy-subrc <> 0.
+    message 'Gagal menerima response (Unknown error)' type 'S' display like 'E'.
+    return.
+  endif.
+
+* Step 10 (was 9): Ambil status dan alasan dari response (VERSI KLASIK ECC)
+  data: lv_status_code(3) type i,
+        lv_reason type string,
+        lv_code(3),
+        lv_reason_c(100).
+
+  call method lo_client->response->get_status
+    importing
+      code   = lv_status_code
+      reason = lv_reason.
+  lv_code     = lv_status_code.
+  lv_reason_c = lv_reason.
+
+* Ambil isi body response
+  lv_result = lo_client->response->get_cdata( ).
+
+* Tampilkan status
+  concatenate 'Status:' lv_code lv_reason_c into lv_msg separated by space.
+  message lv_msg type 'S'.
+
+* Tampilkan isi response
+  clear lv_msg.
+  concatenate 'Response dari server:' lv_result into lv_msg separated by space.
+  message lv_msg type 'S'.
+
+* Step 11 (was 10): Bersihkan koneksi
+  call method lo_client->close.
+
+endfunction.
